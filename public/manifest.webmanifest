@@ -1,0 +1,24 @@
+{
+  "name": "Mohammad Bagher | محمدباقر",
+  "short_name": "Mohammad Bagher",
+  "description": "پورتفولیو و وبلاگ شخصی محمدباقر؛ طراحی اپ و سایت با هوش مصنوعی، اتوماسیون، ایجنت‌ها و بهینه‌سازی نرم‌افزاری سیستم‌ها.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0E0E0E",
+  "theme_color": "#0E0E0E",
+  "lang": "fa-IR",
+  "dir": "rtl",
+  "icons": [
+    {
+      "src": "/favicon.png",
+      "sizes": "64x64",
+      "type": "image/png"
+    },
+    {
+      "src": "/logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

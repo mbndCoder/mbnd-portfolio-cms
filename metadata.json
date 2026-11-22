@@ -1,0 +1,6 @@
+{
+  "name": "محمد باقر نوری | پورتفولیو و وبلاگ",
+  "description": "وب‌سایت شخصی، رزومه، پروژه‌ها و وبلاگ فنی محمد باقر نوری با معماری بومی و لوکال‌فرست",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
