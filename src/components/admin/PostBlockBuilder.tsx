@@ -887,7 +887,7 @@ export function PostBlockBuilder({
                           dir="ltr"
                           value={block.url}
                           onChange={(e) => updateBlock(index, { ...block, url: e.target.value })}
-                          placeholder="/uploads/... or https://..."
+                          placeholder="https://res.cloudinary.com/... or https://..."
                           className={`min-w-0 flex-1 px-3.5 py-2 text-xs ${inputBase}`}
                         />
                         <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-[var(--flame-border)] bg-[var(--flame-tint)] px-3.5 py-2 text-xs font-medium text-[var(--ink)] hover:opacity-90">
@@ -947,8 +947,8 @@ export function PostBlockBuilder({
                     <div className="space-y-2.5">
                       <p className="text-[11px] text-[var(--ink-faint)]">
                         {isEn
-                          ? 'Supports local uploads (MP4/WebM/MOV up to 50MB) plus YouTube & Aparat links:'
-                          : 'پشتیبانی از آپلود محلی (MP4/WebM/MOV تا ۵۰ مگابایت) و لینک مستقیم یوتیوب و آپارات:'}
+                          ? 'Supports direct Cloudinary uploads (MP4/WebM/MOV) plus YouTube & Aparat links:'
+                          : 'پشتیبانی از آپلود مستقیم روی Cloudinary (MP4/WebM/MOV) و لینک مستقیم یوتیوب و آپارات:'}
                       </p>
                       <div className="flex flex-wrap items-center gap-2">
                         <input
@@ -956,7 +956,7 @@ export function PostBlockBuilder({
                           dir="ltr"
                           value={block.url}
                           onChange={(e) => updateBlock(index, { ...block, url: e.target.value })}
-                          placeholder="https://youtube.com/watch?v=... or aparat.com/v/... or /uploads/..."
+                          placeholder="https://youtube.com/watch?v=... or aparat.com/v/... or https://..."
                           className={`min-w-0 flex-1 px-3.5 py-2 text-xs ${inputBase}`}
                         />
                         <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-[var(--flame-border)] bg-[var(--flame-tint)] px-3.5 py-2 text-xs font-medium text-[var(--ink)] hover:opacity-90">
@@ -1033,8 +1033,8 @@ export function PostBlockBuilder({
                     <div className="space-y-2.5">
                       <p className="text-[11px] text-[var(--ink-faint)]">
                         {isEn
-                          ? 'Supports local uploads (MP3, WAV, OGG, M4A) or direct audio links:'
-                          : 'پشتیبانی از آپلود محلی (MP3, WAV, OGG, M4A) یا لینک مستقیم فایل صوتی:'}
+                          ? 'Supports direct Cloudinary uploads (MP3, WAV, OGG, M4A) or direct audio links:'
+                          : 'پشتیبانی از آپلود مستقیم روی Cloudinary (MP3, WAV, OGG, M4A) یا لینک مستقیم فایل صوتی:'}
                       </p>
                       <div className="flex flex-wrap items-center gap-2">
                         <input
@@ -1042,7 +1042,7 @@ export function PostBlockBuilder({
                           dir="ltr"
                           value={block.url}
                           onChange={(e) => updateBlock(index, { ...block, url: e.target.value })}
-                          placeholder="/uploads/... or https://..."
+                          placeholder="https://res.cloudinary.com/... or https://..."
                           className={`min-w-0 flex-1 px-3.5 py-2 text-xs ${inputBase}`}
                         />
                         <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-[var(--flame-border)] bg-[var(--flame-tint)] px-3.5 py-2 text-xs font-medium text-[var(--ink)] hover:opacity-90">

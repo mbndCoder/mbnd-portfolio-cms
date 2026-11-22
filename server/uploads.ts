@@ -1,40 +1,64 @@
+import { v2 as cloudinary, type UploadApiResponse } from 'cloudinary';
 import multer from 'multer';
 import crypto from 'node:crypto';
-import { execFile } from 'node:child_process';
-import fs from 'node:fs';
 import path from 'node:path';
-import { promisify } from 'node:util';
-
-const execFileAsync = promisify(execFile);
-
-export const UPLOAD_DIR = path.resolve(
-  process.cwd(),
-  process.env.UPLOAD_DIR || './public/uploads',
-);
-fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+import {
+  deleteMediaAssetRecord,
+  findMediaAsset,
+  isPlaceholderEnv,
+  listMediaAssets,
+  recordMediaAsset,
+} from './db.ts';
+import type { UploadedMediaItem } from '../src/types/cms.ts';
 
 const ALLOWED_IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.avif', '.gif']);
 const ALLOWED_VIDEO_EXTS = new Set(['.mp4', '.webm', '.mov']);
 const ALLOWED_AUDIO_EXTS = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.aac']);
 const ALLOWED_DOC_EXTS = new Set(['.pdf', '.vcf']);
 
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => {
-    fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-    cb(null, UPLOAD_DIR);
-  },
-  filename: (_req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase() || '.bin';
-    const datePrefix = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    const id = crypto.randomBytes(6).toString('hex');
-    cb(null, `${datePrefix}-${id}${ext}`);
-  },
-});
+let cloudinaryConfigured = false;
 
+export function isCloudinaryConfigured(): boolean {
+  if (process.env.CLOUDINARY_URL && !isPlaceholderEnv(process.env.CLOUDINARY_URL)) {
+    return true;
+  }
+  const cloudName = process.env.CLOUDINARY_CLOUD_NAME?.trim() || '';
+  const apiKey = process.env.CLOUDINARY_API_KEY?.trim() || '';
+  const apiSecret = process.env.CLOUDINARY_API_SECRET?.trim() || '';
+  return (
+    Boolean(cloudName && apiKey && apiSecret) &&
+    !isPlaceholderEnv(cloudName) &&
+    !isPlaceholderEnv(apiKey) &&
+    !isPlaceholderEnv(apiSecret)
+  );
+}
+
+function ensureCloudinaryConfig(): void {
+  if (!isCloudinaryConfigured()) {
+    throw new Error(
+      'تنظیمات Cloudinary در فایل .env کامل نیست. لطفاً متغیرهای CLOUDINARY_CLOUD_NAME، CLOUDINARY_API_KEY و CLOUDINARY_API_SECRET را تنظیم کن.',
+    );
+  }
+  if (cloudinaryConfigured) return;
+
+  if (process.env.CLOUDINARY_URL && !isPlaceholderEnv(process.env.CLOUDINARY_URL)) {
+    cloudinary.config({ secure: true });
+  } else {
+    cloudinary.config({
+      cloud_name: process.env.CLOUDINARY_CLOUD_NAME?.trim(),
+      api_key: process.env.CLOUDINARY_API_KEY?.trim(),
+      api_secret: process.env.CLOUDINARY_API_SECRET?.trim(),
+      secure: true,
+    });
+  }
+  cloudinaryConfigured = true;
+}
+
+// Ephemeral-filesystem safe: keep uploads strictly in memory and stream directly to Cloudinary
 export const uploadMiddleware = multer({
-  storage,
+  storage: multer.memoryStorage(),
   limits: {
-    fileSize: 50 * 1024 * 1024, // 50MB max
+    fileSize: 50 * 1024 * 1024, // 50MB max (Note: Vercel Hobby serverless body limit is 4.5MB)
   },
   fileFilter: (_req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
@@ -63,194 +87,99 @@ export interface ProcessedUploadResult {
   optimized: boolean;
 }
 
-export async function optimizeUploadedMedia(
-  filePath: string,
-  originalExt: string,
+function classifyExtension(ext: string): {
+  kind: 'image' | 'video' | 'audio' | 'file';
+  resourceType: 'image' | 'video' | 'raw';
+} {
+  if (ALLOWED_IMAGE_EXTS.has(ext)) {
+    return { kind: 'image', resourceType: 'image' };
+  }
+  if (ALLOWED_VIDEO_EXTS.has(ext)) {
+    return { kind: 'video', resourceType: 'video' };
+  }
+  if (ALLOWED_AUDIO_EXTS.has(ext)) {
+    // Cloudinary handles audio streams under the "video" resource_type
+    return { kind: 'audio', resourceType: 'video' };
+  }
+  return { kind: 'file', resourceType: 'raw' };
+}
+
+export async function uploadMediaToCloudinary(
+  file: Express.Multer.File,
 ): Promise<ProcessedUploadResult> {
-  const ext = originalExt.toLowerCase();
-  const isVideo = ALLOWED_VIDEO_EXTS.has(ext);
-  const isAudio = ALLOWED_AUDIO_EXTS.has(ext);
-  const isDoc = ALLOWED_DOC_EXTS.has(ext);
-  const stat = fs.statSync(filePath);
+  ensureCloudinaryConfig();
 
-  if (isAudio) {
-    const filename = path.basename(filePath);
-    return {
-      url: `/uploads/${filename}`,
-      filename,
-      kind: 'audio',
-      sizeBytes: stat.size,
-      optimized: false,
-    };
-  }
+  const ext = path.extname(file.originalname).toLowerCase();
+  const { kind, resourceType } = classifyExtension(ext);
+  const folder = (process.env.CLOUDINARY_FOLDER || 'mbnd-uploads').trim().replace(/^\/+|\/+$/g, '');
+  const datePrefix = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const randomId = crypto.randomBytes(6).toString('hex');
+  const publicIdBase =
+    resourceType === 'raw' ? `${datePrefix}-${randomId}${ext}` : `${datePrefix}-${randomId}`;
 
-  if (isDoc) {
-    const filename = path.basename(filePath);
-    return {
-      url: `/uploads/${filename}`,
-      filename,
-      kind: 'file',
-      sizeBytes: stat.size,
-      optimized: false,
-    };
-  }
-
-  if (!isVideo) {
-    if (ext === '.png' || ext === '.jpg' || ext === '.jpeg') {
-      const targetPath = filePath.replace(/\.(png|jpg|jpeg)$/i, '.webp');
-      try {
-        await execFileAsync(
-          'ffmpeg',
-          [
-            '-y',
-            '-i',
-            filePath,
-            '-vf',
-            "scale='min(1600,iw)':-1",
-            '-c:v',
-            'libwebp',
-            '-quality',
-            '82',
-            targetPath,
-          ],
-          { timeout: 15000 },
-        );
-        if (fs.existsSync(targetPath)) {
-          const newStat = fs.statSync(targetPath);
-          if (newStat.size > 0 && newStat.size < stat.size) {
-            fs.unlinkSync(filePath);
-            const filename = path.basename(targetPath);
-            return {
-              url: `/uploads/${filename}`,
-              filename,
-              kind: 'image',
-              sizeBytes: newStat.size,
-              optimized: true,
-            };
-          }
-          fs.unlinkSync(targetPath);
+  const uploaded = await new Promise<UploadApiResponse>((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        folder,
+        public_id: publicIdBase,
+        resource_type: resourceType,
+        overwrite: false,
+        ...(kind === 'image' && ext !== '.gif'
+          ? {
+              transformation: [{ width: 1600, crop: 'limit', quality: 'auto', fetch_format: 'auto' }],
+            }
+          : {}),
+      },
+      (error, result) => {
+        if (error || !result) {
+          reject(error || new Error('آپلود در Cloudinary با خطا مواجه شد.'));
+          return;
         }
-      } catch {
-        // Fallback silently to original uploaded image
-      }
-    }
-    const filename = path.basename(filePath);
-    return {
-      url: `/uploads/${filename}`,
-      filename,
-      kind: 'image',
-      sizeBytes: stat.size,
-      optimized: false,
-    };
-  }
+        resolve(result);
+      },
+    );
+    stream.end(file.buffer);
+  });
 
-  if (ext === '.mp4' || ext === '.mov') {
-    const targetMp4 = ext === '.mov' ? filePath.replace(/\.mov$/i, '.mp4') : filePath;
-    const tempOut = targetMp4.replace(/\.mp4$/i, '.opt.mp4');
-    try {
-      const needsTranscode = ext === '.mov' || stat.size > 4 * 1024 * 1024;
-      const args = needsTranscode
-        ? [
-            '-y',
-            '-i',
-            filePath,
-            '-c:v',
-            'libx264',
-            '-crf',
-            '27',
-            '-preset',
-            'veryfast',
-            '-vf',
-            "scale='min(1280,iw)':-2",
-            '-c:a',
-            'aac',
-            '-b:a',
-            '96k',
-            '-movflags',
-            '+faststart',
-            tempOut,
-          ]
-        : ['-y', '-i', filePath, '-c', 'copy', '-movflags', '+faststart', tempOut];
-
-      await execFileAsync('ffmpeg', args, { timeout: 35000 });
-      if (fs.existsSync(tempOut)) {
-        const optStat = fs.statSync(tempOut);
-        if (optStat.size > 0) {
-          if (ext === '.mov' && fs.existsSync(filePath)) {
-            fs.unlinkSync(filePath);
-          }
-          fs.renameSync(tempOut, targetMp4);
-          return {
-            url: `/uploads/${path.basename(targetMp4)}`,
-            filename: path.basename(targetMp4),
-            kind: 'video',
-            sizeBytes: optStat.size,
-            optimized: true,
-          };
-        }
-      }
-    } catch {
-      if (fs.existsSync(tempOut)) fs.unlinkSync(tempOut);
-    }
-  }
+  const saved = await recordMediaAsset({
+    publicId: uploaded.public_id,
+    filename: uploaded.public_id,
+    url: uploaded.secure_url,
+    kind,
+    resourceType,
+    sizeBytes: uploaded.bytes || file.size || file.buffer.length,
+  });
 
   return {
-    url: `/uploads/${path.basename(filePath)}`,
-    filename: path.basename(filePath),
-    kind: 'video',
-    sizeBytes: stat.size,
-    optimized: false,
+    url: saved.url,
+    filename: saved.publicId,
+    kind: saved.kind,
+    sizeBytes: saved.sizeBytes,
+    optimized: kind === 'image',
   };
 }
 
-export function listUploadedMedia(): Array<{
-  filename: string;
-  url: string;
-  kind: 'image' | 'video' | 'audio' | 'file';
-  sizeBytes: number;
-}> {
-  if (!fs.existsSync(UPLOAD_DIR)) return [];
-  const entries = fs.readdirSync(UPLOAD_DIR);
-  const items: Array<{
-    filename: string;
-    url: string;
-    kind: 'image' | 'video' | 'audio' | 'file';
-    sizeBytes: number;
-    mtimeMs: number;
-  }> = [];
-
-  for (const name of entries) {
-    if (name === '.gitkeep' || name.startsWith('.')) continue;
-    const ext = path.extname(name).toLowerCase();
-    const isImage = ALLOWED_IMAGE_EXTS.has(ext);
-    const isVideo = ALLOWED_VIDEO_EXTS.has(ext);
-    const isAudio = ALLOWED_AUDIO_EXTS.has(ext);
-    const isDoc = ALLOWED_DOC_EXTS.has(ext);
-    if (!isImage && !isVideo && !isAudio && !isDoc) continue;
-    const full = path.join(UPLOAD_DIR, name);
-    const stat = fs.statSync(full);
-    if (!stat.isFile()) continue;
-    items.push({
-      filename: name,
-      url: `/uploads/${name}`,
-      kind: isVideo ? 'video' : isAudio ? 'audio' : isDoc ? 'file' : 'image',
-      sizeBytes: stat.size,
-      mtimeMs: stat.mtimeMs,
-    });
-  }
-
-  return items
-    .sort((a, b) => b.mtimeMs - a.mtimeMs)
-    .map(({ filename, url, kind, sizeBytes }) => ({ filename, url, kind, sizeBytes }));
+export async function listUploadedMedia(): Promise<UploadedMediaItem[]> {
+  return listMediaAssets();
 }
 
-export function deleteUploadedMedia(filename: string): boolean {
-  const safeName = path.basename(filename);
-  if (!safeName || safeName === '.gitkeep' || safeName.startsWith('.')) return false;
-  const resolvedRoot = path.resolve(UPLOAD_DIR);
-  const full = path.resolve(resolvedRoot, safeName);
-  if (!full.startsWith(resolvedRoot + path.sep)) return false;
-  if (!fs.existsSync(full)) return false;
-  fs.unlinkSync(full);
-  return true;
+export async function deleteUploadedMedia(filenameOrPublicId: string): Promise<boolean> {
+  const cleanKey = decodeURIComponent(filenameOrPublicId || '').trim();
+  if (!cleanKey) return false;
+
+  const asset = await findMediaAsset(cleanKey);
+  if (!asset) return false;
+
+  if (isCloudinaryConfigured()) {
+    ensureCloudinaryConfig();
+    try {
+      await cloudinary.uploader.destroy(asset.publicId, {
+        resource_type: asset.resourceType,
+      });
+    } catch (err) {
+      console.error('Cloudinary destroy failed:', err);
+    }
+  }
+
+  return deleteMediaAssetRecord(asset.publicId);
 }

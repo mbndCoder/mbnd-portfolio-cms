@@ -103,32 +103,36 @@ function readStoredAdminLang(): SiteLanguage {
   return 'fa';
 }
 
-const VCARD_FIELD_TYPE_OPTIONS: Array<{ value: VCardExtraFieldType; label: string }> = [
-  { value: 'tel', label: 'شماره تماس اضافه' },
-  { value: 'email', label: 'ایمیل اضافه' },
-  { value: 'url', label: 'لینک / وب‌سایت اضافه' },
-  { value: 'address', label: 'آدرس' },
-  { value: 'note', label: 'یادداشت / برچسب' },
+const VCARD_FIELD_TYPE_OPTIONS: Array<{
+  value: VCardExtraFieldType;
+  label: string;
+  labelEn: string;
+}> = [
+  { value: 'tel', label: 'شماره تماس اضافه', labelEn: 'Extra Phone' },
+  { value: 'email', label: 'ایمیل اضافه', labelEn: 'Extra Email' },
+  { value: 'url', label: 'لینک / وب‌سایت اضافه', labelEn: 'Extra Link / Website' },
+  { value: 'address', label: 'آدرس', labelEn: 'Address' },
+  { value: 'note', label: 'یادداشت / برچسب', labelEn: 'Note / Label' },
 ];
 
-const ICON_OPTIONS: Array<{ value: SocialIconKey; label: string }> = [
-  { value: 'telegram', label: 'تلگرام' },
-  { value: 'bale', label: 'بله' },
-  { value: 'eitaa', label: 'ایتا' },
-  { value: 'rubika', label: 'روبیکا' },
-  { value: 'whatsapp', label: 'واتساپ' },
-  { value: 'instagram', label: 'اینستاگرام' },
-  { value: 'youtube', label: 'یوتیوب' },
-  { value: 'aparat', label: 'آپارات' },
-  { value: 'x', label: 'ایکس (توییتر)' },
-  { value: 'github', label: 'گیت‌هاب' },
-  { value: 'linkedin', label: 'لینکدین' },
-  { value: 'discord', label: 'دیسکورد' },
-  { value: 'virgool', label: 'ویرگول' },
-  { value: 'spotify', label: 'اسپاتیفای' },
-  { value: 'email', label: 'ایمیل' },
-  { value: 'phone', label: 'تلفن' },
-  { value: 'globe', label: 'وب‌سایت' },
+const ICON_OPTIONS: Array<{ value: SocialIconKey; label: string; labelEn: string }> = [
+  { value: 'telegram', label: 'تلگرام', labelEn: 'Telegram' },
+  { value: 'bale', label: 'بله', labelEn: 'Bale' },
+  { value: 'eitaa', label: 'ایتا', labelEn: 'Eitaa' },
+  { value: 'rubika', label: 'روبیکا', labelEn: 'Rubika' },
+  { value: 'whatsapp', label: 'واتساپ', labelEn: 'WhatsApp' },
+  { value: 'instagram', label: 'اینستاگرام', labelEn: 'Instagram' },
+  { value: 'youtube', label: 'یوتیوب', labelEn: 'YouTube' },
+  { value: 'aparat', label: 'آپارات', labelEn: 'Aparat' },
+  { value: 'x', label: 'ایکس (توییتر)', labelEn: 'X (Twitter)' },
+  { value: 'github', label: 'گیت‌هاب', labelEn: 'GitHub' },
+  { value: 'linkedin', label: 'لینکدین', labelEn: 'LinkedIn' },
+  { value: 'discord', label: 'دیسکورد', labelEn: 'Discord' },
+  { value: 'virgool', label: 'ویرگول', labelEn: 'Virgool' },
+  { value: 'spotify', label: 'اسپاتیفای', labelEn: 'Spotify' },
+  { value: 'email', label: 'ایمیل', labelEn: 'Email' },
+  { value: 'phone', label: 'تلفن', labelEn: 'Phone' },
+  { value: 'globe', label: 'وب‌سایت', labelEn: 'Website' },
 ];
 
 const MODEL_PRESETS: Record<AiProviderType, string[]> = {
@@ -500,13 +504,17 @@ export function AdminPortal() {
     const res = await adminFetch('/api/admin/bootstrap');
     if (!res.ok) {
       if (res.status === 401) {
-        flashError('نشست مدیریت منقضی شده؛ لطفاً دوباره وارد شو.');
+        flashError(
+          isEn
+            ? 'Admin session expired; please sign in again.'
+            : 'نشست مدیریت منقضی شده؛ لطفاً دوباره وارد شو.',
+        );
       }
       return;
     }
     const data = await safeJson<BootstrapResponse>(res);
     if (!data.settings) {
-      flashError(data.error || 'خطا در دریافت اطلاعات پنل.');
+      flashError(data.error || (isEn ? 'Failed to load panel data.' : 'خطا در دریافت اطلاعات پنل.'));
       return;
     }
     if (data.username) {
@@ -556,11 +564,19 @@ export function AdminPortal() {
     setLoginError('');
     const trimmedUser = username.trim();
     if (!trimmedUser || !password) {
-      setLoginError('نام کاربری و رمز عبور دلخواه را وارد کن.');
+      setLoginError(
+        isEn
+          ? 'Please enter your desired username and password.'
+          : 'نام کاربری و رمز عبور دلخواه را وارد کن.',
+      );
       return;
     }
     if (password !== setupConfirmPassword) {
-      setLoginError('رمز عبور و تکرار آن یکسان نیستند.');
+      setLoginError(
+        isEn
+          ? 'Password and confirmation do not match.'
+          : 'رمز عبور و تکرار آن یکسان نیستند.',
+      );
       return;
     }
     setLoggingIn(true);
@@ -576,7 +592,10 @@ export function AdminPortal() {
       });
       const data = await safeJson<{ ok?: boolean; token?: string; username?: string }>(res);
       if (!res.ok || !data.ok) {
-        setLoginError(data.error || 'خطا در راه‌اندازی اولیه حساب مدیر.');
+        setLoginError(
+          data.error ||
+            (isEn ? 'Failed to initialize admin account.' : 'خطا در راه‌اندازی اولیه حساب مدیر.'),
+        );
         return;
       }
       if (data.token) {
@@ -592,7 +611,9 @@ export function AdminPortal() {
       setSetupConfirmPassword('');
       await loadBootstrap();
     } catch {
-      setLoginError('خطا در برقراری ارتباط با سرور.');
+      setLoginError(
+        isEn ? 'Unable to connect to the server.' : 'خطا در برقراری ارتباط با سرور.',
+      );
     } finally {
       setLoggingIn(false);
     }
@@ -602,7 +623,9 @@ export function AdminPortal() {
     event.preventDefault();
     setLoginError('');
     if (!username.trim() || !password) {
-      setLoginError('نام کاربری و رمز عبور را وارد کن.');
+      setLoginError(
+        isEn ? 'Please enter username and password.' : 'نام کاربری و رمز عبور را وارد کن.',
+      );
       return;
     }
     setLoggingIn(true);
@@ -618,7 +641,10 @@ export function AdminPortal() {
       });
       const data = await safeJson<{ ok?: boolean; token?: string; username?: string }>(res);
       if (!res.ok || !data.ok) {
-        setLoginError(data.error || 'نام کاربری یا رمز عبور اشتباه است.');
+        setLoginError(
+          data.error ||
+            (isEn ? 'Invalid username or password.' : 'نام کاربری یا رمز عبور اشتباه است.'),
+        );
         return;
       }
       if (data.token) {
@@ -632,7 +658,9 @@ export function AdminPortal() {
       setPassword('');
       await loadBootstrap();
     } catch {
-      setLoginError('خطا در برقراری ارتباط با سرور.');
+      setLoginError(
+        isEn ? 'Unable to connect to the server.' : 'خطا در برقراری ارتباط با سرور.',
+      );
     } finally {
       setLoggingIn(false);
     }
@@ -654,14 +682,22 @@ export function AdminPortal() {
       });
       const data = await safeJson<{ file?: UploadedMediaItem }>(res);
       if (!res.ok || !data.file) {
-        flashError(data.error || 'آپلود فایل ناموفق بود.');
+        flashError(data.error || (isEn ? 'File upload failed.' : 'آپلود فایل ناموفق بود.'));
         return null;
       }
       setMedia((prev) => [data.file!, ...prev.filter((m) => m.filename !== data.file!.filename)]);
-      flashNotice('فایل با موفقیت روی سرور ذخیره شد.');
+      flashNotice(
+        isEn
+          ? 'File uploaded successfully to Cloudinary.'
+          : 'فایل با موفقیت روی Cloudinary آپلود شد.',
+      );
       return data.file.url;
     } catch {
-      flashError('خطا در اتصال به سرور هنگام آپلود فایل.');
+      flashError(
+        isEn
+          ? 'Server connection error while uploading file.'
+          : 'خطا در اتصال به سرور هنگام آپلود فایل.',
+      );
       return null;
     }
   };
@@ -960,14 +996,14 @@ export function AdminPortal() {
     try {
       const res = await adminFetch(`/api/admin/posts/${id}`, { method: 'DELETE' });
       if (!res.ok) {
-        flashError('حذف نوشته ناموفق بود.');
+        flashError(isEn ? 'Failed to delete post.' : 'حذف نوشته ناموفق بود.');
         return;
       }
       setPosts((prev) => prev.filter((p) => p.id !== id));
       if (editingPostId === id) resetPostForm();
-      flashNotice('نوشته برای همیشه حذف شد.');
+      flashNotice(isEn ? 'Post permanently deleted.' : 'نوشته برای همیشه حذف شد.');
     } catch {
-      flashError('خطا در اتصال به سرور.');
+      flashError(isEn ? 'Connection error.' : 'خطا در اتصال به سرور.');
     }
   };
 
@@ -1180,12 +1216,12 @@ export function AdminPortal() {
   const handleDeleteProject = async (id: number) => {
     const res = await adminFetch(`/api/admin/projects/${id}`, { method: 'DELETE' });
     if (!res.ok) {
-      flashError('حذف پروژه ناموفق بود.');
+      flashError(isEn ? 'Failed to delete project.' : 'حذف پروژه ناموفق بود.');
       return;
     }
     setProjects((prev) => prev.filter((p) => p.id !== id));
     if (editingProjId === id) resetProjectForm();
-    flashNotice('پروژه حذف شد.');
+    flashNotice(isEn ? 'Project deleted.' : 'پروژه حذف شد.');
   };
 
   // ==================== SOCIALS (DRAG & DROP) ====================
@@ -1195,6 +1231,7 @@ export function AdminPortal() {
       {
         id: `soc_${Date.now().toString(36)}`,
         label: 'لینک جدید',
+        labelEn: 'New Link',
         handle: '',
         url: 'https://',
         iconKey: 'globe',
@@ -1234,14 +1271,19 @@ export function AdminPortal() {
       });
       const data = await safeJson<{ settings?: SiteSettings }>(res);
       if (!res.ok || !data.settings) {
-        flashError(data.error || 'ذخیره دکمه‌های پیام‌رسان ناموفق بود.');
+        flashError(
+          data.error ||
+            (isEn ? 'Failed to save social links.' : 'ذخیره دکمه‌های پیام‌رسان ناموفق بود.'),
+        );
         return;
       }
       setSettings(data.settings);
       setSocials(parseSocialArray(data.settings.socialLinksJson));
-      flashNotice('دکمه‌های پیام‌رسان و لینک‌ها ذخیره شد.');
+      flashNotice(
+        isEn ? 'Social links saved.' : 'دکمه‌های پیام‌رسان و لینک‌ها ذخیره شد.',
+      );
     } catch {
-      flashError('خطا در اتصال به سرور.');
+      flashError(isEn ? 'Connection error.' : 'خطا در اتصال به سرور.');
     } finally {
       setBusyAction(false);
     }
@@ -1292,14 +1334,16 @@ export function AdminPortal() {
       });
       const data = await safeJson<{ settings?: SiteSettings }>(res);
       if (!res.ok || !data.settings) {
-        flashError(data.error || 'ذخیره تنظیمات ناموفق بود.');
+        flashError(
+          data.error || (isEn ? 'Failed to save site settings.' : 'ذخیره تنظیمات ناموفق بود.'),
+        );
         return;
       }
       setSettings(data.settings);
       setVcardExtraFields(parseVCardExtraArray(data.settings.vcardExtraFieldsJson || '[]'));
-      flashNotice('تنظیمات سایت ذخیره شد.');
+      flashNotice(isEn ? 'Site settings saved.' : 'تنظیمات سایت ذخیره شد.');
     } catch {
-      flashError('خطا در اتصال به سرور.');
+      flashError(isEn ? 'Connection error.' : 'خطا در اتصال به سرور.');
     } finally {
       setBusyAction(false);
     }
@@ -1327,13 +1371,20 @@ export function AdminPortal() {
       });
       const data = await safeJson<{ aiConfig?: AiConfigPublic }>(res);
       if (!res.ok || !data.aiConfig) {
-        flashError(data.error || 'ذخیره تنظیمات هوش مصنوعی ناموفق بود.');
+        flashError(
+          data.error ||
+            (isEn ? 'Failed to save AI settings.' : 'ذخیره تنظیمات هوش مصنوعی ناموفق بود.'),
+        );
         return;
       }
       syncAiForm(data.aiConfig);
-      flashNotice('تنظیمات هوش مصنوعی به‌صورت رمزنگاری‌شده ذخیره شد.');
+      flashNotice(
+        isEn
+          ? 'AI settings encrypted and saved.'
+          : 'تنظیمات هوش مصنوعی به‌صورت رمزنگاری‌شده ذخیره شد.',
+      );
     } catch {
-      flashError('خطا در اتصال به سرور.');
+      flashError(isEn ? 'Connection error.' : 'خطا در اتصال به سرور.');
     } finally {
       setBusyAction(false);
     }
@@ -1349,11 +1400,16 @@ export function AdminPortal() {
       });
       const data = await safeJson<{ aiConfig?: AiConfigPublic }>(res);
       if (!res.ok || !data.aiConfig) {
-        flashError(data.error || 'حذف کلید سفارشی ناموفق بود.');
+        flashError(
+          data.error ||
+            (isEn ? 'Failed to remove custom API key.' : 'حذف کلید سفارشی ناموفق بود.'),
+        );
         return;
       }
       syncAiForm(data.aiConfig);
-      flashNotice('کلید سفارشی هوش مصنوعی حذف شد.');
+      flashNotice(
+        isEn ? 'Custom AI API key removed.' : 'کلید سفارشی هوش مصنوعی حذف شد.',
+      );
     } finally {
       setBusyAction(false);
     }
@@ -1375,16 +1431,18 @@ export function AdminPortal() {
       });
       const data = await safeJson<{ ok?: boolean; model?: string; reply?: string }>(res);
       if (!res.ok || !data.ok) {
-        const msg = data.error || 'تست اتصال ناموفق بود.';
+        const msg = data.error || (isEn ? 'Connection test failed.' : 'تست اتصال ناموفق بود.');
         setAiTestResult({ ok: false, text: msg });
         flashError(msg);
         return;
       }
-      const okMsg = `اتصال با موفقیت برقرار شد (${data.model || aiModel}): ${data.reply || 'آماده'}`;
+      const okMsg = isEn
+        ? `Connected successfully (${data.model || aiModel}): ${data.reply || 'Ready'}`
+        : `اتصال با موفقیت برقرار شد (${data.model || aiModel}): ${data.reply || 'آماده'}`;
       setAiTestResult({ ok: true, text: okMsg });
       flashNotice(okMsg);
     } catch {
-      const msg = 'خطا در تست اتصال هوش مصنوعی.';
+      const msg = isEn ? 'Error testing AI connection.' : 'خطا در تست اتصال هوش مصنوعی.';
       setAiTestResult({ ok: false, text: msg });
       flashError(msg);
     } finally {
@@ -1396,11 +1454,15 @@ export function AdminPortal() {
   const handleChangeCredentials = async (event: FormEvent) => {
     event.preventDefault();
     if (!secCurrentPassword) {
-      flashError('رمز عبور فعلی را وارد کن.');
+      flashError(isEn ? 'Enter your current password.' : 'رمز عبور فعلی را وارد کن.');
       return;
     }
     if (secNewPassword && secNewPassword !== secConfirmPassword) {
-      flashError('رمز عبور جدید و تکرار آن یکسان نیست.');
+      flashError(
+        isEn
+          ? 'New password and confirmation do not match.'
+          : 'رمز عبور جدید و تکرار آن یکسان نیست.',
+      );
       return;
     }
     setBusyAction(true);
@@ -1416,7 +1478,10 @@ export function AdminPortal() {
       });
       const data = await safeJson<{ ok?: boolean; username?: string; token?: string }>(res);
       if (!res.ok || !data.ok) {
-        flashError(data.error || 'تغییر اطلاعات ورود ناموفق بود.');
+        flashError(
+          data.error ||
+            (isEn ? 'Failed to update credentials.' : 'تغییر اطلاعات ورود ناموفق بود.'),
+        );
         return;
       }
       if (data.token) setStoredToken(data.token);
@@ -1427,9 +1492,13 @@ export function AdminPortal() {
       setSecCurrentPassword('');
       setSecNewPassword('');
       setSecConfirmPassword('');
-      flashNotice('نام کاربری/رمز عبور به‌روزرسانی شد و همه نشست‌های قبلی باطل شدند.');
+      flashNotice(
+        isEn
+          ? 'Credentials updated and all previous sessions revoked.'
+          : 'نام کاربری/رمز عبور به‌روزرسانی شد و همه نشست‌های قبلی باطل شدند.',
+      );
     } catch {
-      flashError('خطا در اتصال به سرور.');
+      flashError(isEn ? 'Connection error.' : 'خطا در اتصال به سرور.');
     } finally {
       setBusyAction(false);
     }
@@ -1463,7 +1532,7 @@ export function AdminPortal() {
     const res = await adminFetch(`/api/admin/messages/${id}`, { method: 'DELETE' });
     if (!res.ok) return;
     setMessages((prev) => prev.filter((m) => m.id !== id));
-    flashNotice('پیام حذف شد.');
+    flashNotice(isEn ? 'Message deleted.' : 'پیام حذف شد.');
   };
 
   const handleDeleteMedia = async (filename: string) => {
@@ -1471,11 +1540,11 @@ export function AdminPortal() {
       method: 'DELETE',
     });
     if (!res.ok) {
-      flashError('حذف فایل ناموفق بود.');
+      flashError(isEn ? 'Failed to delete file.' : 'حذف فایل ناموفق بود.');
       return;
     }
     setMedia((prev) => prev.filter((m) => m.filename !== filename));
-    flashNotice('فایل حذف شد.');
+    flashNotice(isEn ? 'File deleted.' : 'فایل حذف شد.');
   };
 
   const copyMediaUrl = async (url: string) => {
@@ -1837,7 +1906,9 @@ export function AdminPortal() {
                             {isEn && c.nameEn ? `${c.nameEn} (${c.name})` : c.name}
                           </option>
                         ))}
-                        {categories.length === 0 && <option value="یادگیری">یادگیری</option>}
+                        {categories.length === 0 && (
+                          <option value="یادگیری">{isEn ? 'Learning' : 'یادگیری'}</option>
+                        )}
                       </select>
                     </div>
                     <div>
@@ -1864,7 +1935,7 @@ export function AdminPortal() {
                           dir="ltr"
                           value={postCover}
                           onChange={(e) => setPostCover(e.target.value)}
-                          placeholder="/uploads/..."
+                          placeholder="https://res.cloudinary.com/..."
                           className="min-w-0 flex-1 rounded-xl border border-[var(--hair-strong)] bg-[var(--ground-deep)] px-3 py-2 text-xs text-[var(--ink)] placeholder:text-[var(--ink-faint)] focus:border-[var(--flame)] focus:outline-none"
                         />
                         <label className="inline-flex cursor-pointer items-center gap-1 rounded-xl border border-[var(--flame-border)] bg-[var(--flame-tint)] px-3 py-2 text-xs text-[var(--ink)] hover:opacity-90">
@@ -2834,7 +2905,7 @@ export function AdminPortal() {
                       >
                         {ICON_OPTIONS.map((opt) => (
                           <option key={opt.value} value={opt.value}>
-                            {opt.label}
+                            {isEn ? opt.labelEn : opt.label}
                           </option>
                         ))}
                       </select>
@@ -2854,7 +2925,10 @@ export function AdminPortal() {
                       dir="ltr"
                       value={item.labelEn || ''}
                       onChange={(e) => updateSocialItem(idx, { labelEn: e.target.value })}
-                      placeholder="Label (EN)"
+                      placeholder={
+                        ICON_OPTIONS.find((opt) => opt.value === item.iconKey)?.labelEn ||
+                        'Label (EN)'
+                      }
                       aria-label="English Label"
                       className="rounded-xl border border-[var(--hair-strong)] bg-[var(--ground)] px-3 py-2 text-xs text-[var(--ink)] placeholder:text-[var(--ink-faint)] focus:border-[var(--flame)] focus:outline-none md:col-span-2"
                     />
@@ -3666,7 +3740,7 @@ export function AdminPortal() {
                           >
                             {VCARD_FIELD_TYPE_OPTIONS.map((opt) => (
                               <option key={opt.value} value={opt.value}>
-                                {opt.label}
+                                {isEn ? opt.labelEn : opt.label}
                               </option>
                             ))}
                           </select>
@@ -3809,7 +3883,9 @@ export function AdminPortal() {
                       }}
                       className="w-full rounded-xl border border-[var(--hair-strong)] bg-[var(--ground-deep)] px-3.5 py-2.5 text-sm text-[var(--ink)] focus:border-[var(--flame)] focus:outline-none"
                     >
-                      <option value="gemini">Google Gemini (جمینای)</option>
+                      <option value="gemini">
+                        {isEn ? 'Google Gemini' : 'Google Gemini (جمینای)'}
+                      </option>
                       <option value="openai_compatible">
                         OpenAI-Compatible (OpenAI, OpenRouter, DeepSeek, Claude...)
                       </option>
@@ -4120,12 +4196,12 @@ export function AdminPortal() {
             <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-base font-bold text-[var(--ink)]">
-                  {isEn ? 'Local Media Library' : 'فایل‌ها و رسانه محلی'}
+                  {isEn ? 'Media Library (Cloudinary)' : 'فایل‌ها و رسانه (Cloudinary)'}
                 </h2>
                 <p className="mt-1 text-xs text-[var(--ink-faint)]">
                   {isEn
-                    ? 'Images (PNG/JPG/WebP/GIF), Video (MP4/WebM/MOV), Audio (MP3/WAV/OGG/M4A) & PDF up to 50MB'
-                    : 'تصویر (PNG/JPG/WebP/GIF)، ویدیو (MP4/WebM/MOV)، صوت (MP3/WAV/OGG/M4A) و PDF تا ۵۰ مگابایت'}
+                    ? 'Images (PNG/JPG/WebP/GIF), Video (MP4/WebM/MOV), Audio (MP3/WAV/OGG/M4A) & PDF — hosted directly on Cloudinary'
+                    : 'تصویر (PNG/JPG/WebP/GIF)، ویدیو (MP4/WebM/MOV)، صوت (MP3/WAV/OGG/M4A) و PDF — میزبانی ابری روی Cloudinary'}
                 </p>
               </div>
               <label className="ember-btn-flame inline-flex cursor-pointer items-center gap-2 rounded-2xl px-4 py-2 text-xs">

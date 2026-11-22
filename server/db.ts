@@ -1,11 +1,12 @@
-import Database from 'better-sqlite3';
-import { drizzle } from 'drizzle-orm/better-sqlite3';
-import { asc, desc, eq } from 'drizzle-orm';
+import { createClient, type Client } from '@libsql/client';
+import { drizzle, type LibSQLDatabase } from 'drizzle-orm/libsql';
+import { asc, desc, eq, or } from 'drizzle-orm';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
   categories,
+  mediaAssets,
   messages,
   posts,
   projectsTable,
@@ -30,24 +31,84 @@ import type {
   ProjectItem,
   SiteSettings,
   SocialPlatformLink,
+  UploadedMediaItem,
   VCardExtraField,
   VCardExtraFieldType,
 } from '../src/types/cms.ts';
 
-const dbPath = path.resolve(process.cwd(), process.env.DB_PATH || './data/site.db');
-fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+export function isPlaceholderEnv(value?: string): boolean {
+  const v = value?.trim() || '';
+  if (!v) return true;
+  if (
+    v.startsWith('CHANGE_ME') ||
+    v === 'MY_GEMINI_API_KEY' ||
+    v === 'MY_APP_URL' ||
+    v === 'MY_OPENAI_API_KEY' ||
+    v.includes('your-database-name') ||
+    v.includes('your-turso-auth-token')
+  ) {
+    return true;
+  }
+  return false;
+}
 
-const sqlite = new Database(dbPath);
-sqlite.pragma('journal_mode = WAL');
-sqlite.pragma('foreign_keys = ON');
+function createLibsqlConnection(): { client: Client; db: LibSQLDatabase } {
+  const rawUrl = process.env.LIBSQL_URL?.trim();
+  const rawToken = process.env.LIBSQL_AUTH_TOKEN?.trim();
+  const url = rawUrl && !isPlaceholderEnv(rawUrl) ? rawUrl : '';
+  const authToken = rawToken && !isPlaceholderEnv(rawToken) ? rawToken : undefined;
 
-sqlite.exec(`
-  CREATE TABLE IF NOT EXISTS settings (
+  if (url) {
+    const client = createClient({
+      url,
+      ...(authToken ? { authToken } : {}),
+    });
+    return { client, db: drizzle(client) };
+  }
+
+  if (process.env.VERCEL === '1') {
+    throw new Error(
+      'LIBSQL_URL is required on Vercel Serverless. Set LIBSQL_URL and LIBSQL_AUTH_TOKEN in Environment Variables.',
+    );
+  }
+
+  // Local development / test fallback using libSQL's embedded SQLite file driver (no native better-sqlite3)
+  const localDbPath = path.resolve(process.cwd(), process.env.DB_PATH || './data/site.db');
+  fs.mkdirSync(path.dirname(localDbPath), { recursive: true });
+  const client = createClient({ url: `file:${localDbPath}` });
+  return { client, db: drizzle(client) };
+}
+
+let cachedClient: Client | null = null;
+let cachedDb: LibSQLDatabase | null = null;
+let initPromise: Promise<void> | null = null;
+let cachedSessionSecret = '';
+
+export function getLibsqlClient(): Client {
+  if (!cachedClient) {
+    const conn = createLibsqlConnection();
+    cachedClient = conn.client;
+    cachedDb = conn.db;
+  }
+  return cachedClient;
+}
+
+export function getDb(): LibSQLDatabase {
+  if (!cachedDb) {
+    const conn = createLibsqlConnection();
+    cachedClient = conn.client;
+    cachedDb = conn.db;
+  }
+  return cachedDb;
+}
+
+const SCHEMA_STATEMENTS: string[] = [
+  `CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS categories (
+  )`,
+  `CREATE TABLE IF NOT EXISTS categories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
     name_en TEXT NOT NULL DEFAULT '',
@@ -55,8 +116,8 @@ sqlite.exec(`
     description TEXT NOT NULL,
     description_en TEXT NOT NULL DEFAULT '',
     sort_order INTEGER NOT NULL DEFAULT 0
-  );
-  CREATE TABLE IF NOT EXISTS posts (
+  )`,
+  `CREATE TABLE IF NOT EXISTS posts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
     title_en TEXT NOT NULL DEFAULT '',
@@ -71,8 +132,8 @@ sqlite.exec(`
     reading_minutes INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS projects (
+  )`,
+  `CREATE TABLE IF NOT EXISTS projects (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
     title_en TEXT NOT NULL DEFAULT '',
@@ -86,8 +147,8 @@ sqlite.exec(`
     url TEXT NOT NULL,
     featured INTEGER NOT NULL DEFAULT 1,
     sort_order INTEGER NOT NULL DEFAULT 0
-  );
-  CREATE TABLE IF NOT EXISTS messages (
+  )`,
+  `CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     contact TEXT NOT NULL,
@@ -95,81 +156,89 @@ sqlite.exec(`
     message TEXT NOT NULL,
     read INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS users (
+  )`,
+  `CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     role TEXT NOT NULL DEFAULT 'admin',
     token_version INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL
-  );
-`);
+  )`,
+  `CREATE TABLE IF NOT EXISTS media_assets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_id TEXT NOT NULL UNIQUE,
+    filename TEXT NOT NULL,
+    url TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'image',
+    resource_type TEXT NOT NULL DEFAULT 'image',
+    size_bytes INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+  )`,
+];
 
-function ensureColumn(table: string, col: string, definition: string): void {
-  const cols = sqlite.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
-  if (!cols.some((c) => c.name === col)) {
-    sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${definition};`);
+const ALLOWED_MIGRATION_TABLES = new Set([
+  'users',
+  'categories',
+  'posts',
+  'projects',
+  'media_assets',
+]);
+
+async function ensureColumn(
+  client: Client,
+  table: string,
+  col: string,
+  definition: string,
+): Promise<void> {
+  if (!ALLOWED_MIGRATION_TABLES.has(table)) return;
+  const info = await client.execute(`PRAGMA table_info(${table})`);
+  const exists = info.rows.some((r) => String(r.name) === col);
+  if (!exists) {
+    await client.execute(`ALTER TABLE ${table} ADD COLUMN ${col} ${definition}`);
   }
 }
 
-// Safe idempotent migrations for existing SQLite databases
-ensureColumn('users', 'token_version', 'INTEGER NOT NULL DEFAULT 1');
-ensureColumn('categories', 'name_en', "TEXT NOT NULL DEFAULT ''");
-ensureColumn('categories', 'description_en', "TEXT NOT NULL DEFAULT ''");
-ensureColumn('posts', 'title_en', "TEXT NOT NULL DEFAULT ''");
-ensureColumn('posts', 'excerpt_en', "TEXT NOT NULL DEFAULT ''");
-ensureColumn('posts', 'blocks_en', "TEXT NOT NULL DEFAULT '[]'");
-ensureColumn('projects', 'title_en', "TEXT NOT NULL DEFAULT ''");
-ensureColumn('projects', 'role_en', "TEXT NOT NULL DEFAULT ''");
-ensureColumn('projects', 'period_en', "TEXT NOT NULL DEFAULT ''");
-ensureColumn('projects', 'summary_en', "TEXT NOT NULL DEFAULT ''");
+export async function getOrCreateSessionSecret(): Promise<string> {
+  if (cachedSessionSecret) return cachedSessionSecret;
 
-export const db = drizzle(sqlite);
-
-export function isPlaceholderEnv(value?: string): boolean {
-  const v = value?.trim() || '';
-  if (!v) return true;
-  if (
-    v.startsWith('CHANGE_ME') ||
-    v === 'MY_GEMINI_API_KEY' ||
-    v === 'MY_APP_URL' ||
-    v === 'MY_OPENAI_API_KEY'
-  ) {
-    return true;
-  }
-  return false;
-}
-
-export function getOrCreateSessionSecret(): string {
   const fromEnv = process.env.SESSION_SECRET?.trim();
   if (fromEnv && !isPlaceholderEnv(fromEnv) && fromEnv.length >= 16) {
-    return fromEnv;
+    cachedSessionSecret = fromEnv;
+    return cachedSessionSecret;
   }
-  const existing = db
+
+  const db = getDb();
+  const [existing] = await db
     .select()
     .from(settings)
     .where(eq(settings.key, '_internal_session_secret'))
-    .get();
+    .limit(1);
+
   if (existing?.value && existing.value.length >= 32) {
-    return existing.value;
+    cachedSessionSecret = existing.value;
+    return cachedSessionSecret;
   }
+
   const generated = crypto.randomBytes(32).toString('hex');
   const now = new Date().toISOString();
-  db.insert(settings)
+  await db
+    .insert(settings)
     .values({ key: '_internal_session_secret', value: generated, updatedAt: now })
     .onConflictDoUpdate({
       target: settings.key,
       set: { value: generated, updatedAt: now },
-    })
-    .run();
-  return generated;
+    });
+
+  cachedSessionSecret = generated;
+  return cachedSessionSecret;
 }
 
 export const DEFAULT_SOCIAL_LINKS: SocialPlatformLink[] = [
   {
     id: 'telegram',
     label: 'تلگرام',
+    labelEn: 'Telegram',
     handle: '@mbnd1224',
     url: 'https://t.me/mbnd1224',
     iconKey: 'telegram',
@@ -178,6 +247,7 @@ export const DEFAULT_SOCIAL_LINKS: SocialPlatformLink[] = [
   {
     id: 'email',
     label: 'ایمیل',
+    labelEn: 'Email',
     handle: 'mbnd1224@gmail.com',
     url: 'mailto:mbnd1224@gmail.com',
     iconKey: 'email',
@@ -186,6 +256,7 @@ export const DEFAULT_SOCIAL_LINKS: SocialPlatformLink[] = [
   {
     id: 'bale',
     label: 'بله',
+    labelEn: 'Bale',
     handle: '@mbnd1224',
     url: 'https://ble.ir/mbnd1224',
     iconKey: 'bale',
@@ -194,6 +265,7 @@ export const DEFAULT_SOCIAL_LINKS: SocialPlatformLink[] = [
   {
     id: 'github',
     label: 'گیت‌هاب',
+    labelEn: 'GitHub',
     handle: 'mbndCoder',
     url: 'https://github.com/mbndCoder',
     iconKey: 'github',
@@ -202,6 +274,7 @@ export const DEFAULT_SOCIAL_LINKS: SocialPlatformLink[] = [
   {
     id: 'youtube',
     label: 'یوتیوب',
+    labelEn: 'YouTube',
     handle: '',
     url: 'https://youtube.com',
     iconKey: 'youtube',
@@ -210,6 +283,7 @@ export const DEFAULT_SOCIAL_LINKS: SocialPlatformLink[] = [
   {
     id: 'instagram',
     label: 'اینستاگرام',
+    labelEn: 'Instagram',
     handle: '',
     url: 'https://instagram.com',
     iconKey: 'instagram',
@@ -218,6 +292,7 @@ export const DEFAULT_SOCIAL_LINKS: SocialPlatformLink[] = [
   {
     id: 'linkedin',
     label: 'لینکدین',
+    labelEn: 'LinkedIn',
     handle: 'mbnd',
     url: 'https://linkedin.com/in/mbnd',
     iconKey: 'linkedin',
@@ -351,13 +426,13 @@ function createSamplePostBlocks(): ContentBlock[] {
       type: 'image',
       url: '/poster.webp',
       alt: 'تصویر نمونه در نوشته وبلاگ',
-      caption: 'نمونه بلوک تصویر با آپلود مستقیم از دستگاه یا لینک خارجی',
+      caption: 'نمونه بلوک تصویر با آپلود مستقیم به کلودیناری یا لینک خارجی',
     },
     {
       id: 'sample_video',
       type: 'video',
       url: '/hero-loop.mp4',
-      caption: 'نمونه بلوک ویدیو (پشتیبانی از آپلود محلی MP4/WebM و همچنین لینک مستقیم یوتیوب و آپارات)',
+      caption: 'نمونه بلوک ویدیو (پشتیبانی از آپلود مستقیم MP4/WebM و همچنین لینک مستقیم یوتیوب و آپارات)',
     },
     {
       id: 'sample_audio',
@@ -446,20 +521,20 @@ function createSamplePostBlocksEn(): ContentBlock[] {
       type: 'image',
       url: '/poster.webp',
       alt: 'Sample blog illustration',
-      caption: 'Image block with local device upload or external image URL',
+      caption: 'Image block with direct Cloudinary upload or external image URL',
     },
     {
       id: 'sample_video',
       type: 'video',
       url: '/hero-loop.mp4',
-      caption: 'Video block supporting local MP4/WebM uploads as well as direct YouTube and Aparat links',
+      caption: 'Video block supporting MP4/WebM uploads as well as direct YouTube and Aparat links',
     },
     {
       id: 'sample_audio',
       type: 'audio',
       url: '/sample-audio.mp3',
       title: 'Sample Audio Clip / Short Podcast',
-      caption: 'Full support for local audio uploads (MP3, WAV, OGG, M4A) or external audio URLs',
+      caption: 'Full support for audio uploads (MP3, WAV, OGG, M4A) or external audio URLs',
     },
     {
       id: 'sample_h2_cards',
@@ -524,88 +599,111 @@ function createSamplePostBlocksEn(): ContentBlock[] {
   ];
 }
 
-function seedInitialData(): void {
-  const now = new Date().toISOString();
+async function runDatabaseInit(): Promise<void> {
+  const client = getLibsqlClient();
+  const db = getDb();
 
-  // 1. Seed Settings (missing keys only)
-  for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
-    db.insert(settings)
-      .values({ key, value, updatedAt: now })
-      .onConflictDoNothing()
-      .run();
+  // 1. Create tables if missing
+  for (const sql of SCHEMA_STATEMENTS) {
+    await client.execute(sql);
   }
 
-  // Ensure session secret exists
-  getOrCreateSessionSecret();
+  // 2. Safe idempotent column migrations for existing databases
+  await ensureColumn(client, 'users', 'token_version', 'INTEGER NOT NULL DEFAULT 1');
+  await ensureColumn(client, 'categories', 'name_en', "TEXT NOT NULL DEFAULT ''");
+  await ensureColumn(client, 'categories', 'description_en', "TEXT NOT NULL DEFAULT ''");
+  await ensureColumn(client, 'posts', 'title_en', "TEXT NOT NULL DEFAULT ''");
+  await ensureColumn(client, 'posts', 'excerpt_en', "TEXT NOT NULL DEFAULT ''");
+  await ensureColumn(client, 'posts', 'blocks_en', "TEXT NOT NULL DEFAULT '[]'");
+  await ensureColumn(client, 'projects', 'title_en', "TEXT NOT NULL DEFAULT ''");
+  await ensureColumn(client, 'projects', 'role_en', "TEXT NOT NULL DEFAULT ''");
+  await ensureColumn(client, 'projects', 'period_en', "TEXT NOT NULL DEFAULT ''");
+  await ensureColumn(client, 'projects', 'summary_en', "TEXT NOT NULL DEFAULT ''");
 
-  // 2. Sync / Seed Admin User strictly from explicit non-placeholder env vars (zero hardcoded credentials)
+  const now = new Date().toISOString();
+
+  // 3. Seed missing settings keys in a single batch where possible
+  const existingSettingsRows = await db.select({ key: settings.key }).from(settings);
+  const existingKeys = new Set(existingSettingsRows.map((r) => r.key));
+  const missingEntries = Object.entries(DEFAULT_SETTINGS).filter(([k]) => !existingKeys.has(k));
+  if (missingEntries.length > 0) {
+    await db
+      .insert(settings)
+      .values(missingEntries.map(([key, value]) => ({ key, value, updatedAt: now })))
+      .onConflictDoNothing();
+  }
+
+  // 4. Ensure session secret exists
+  await getOrCreateSessionSecret();
+
+  // 5. Sync / Seed Admin User strictly from explicit non-placeholder env vars
   const rawEnvUser = process.env.ADMIN_USERNAME?.trim();
   const rawEnvHash = process.env.ADMIN_PASSWORD_HASH?.trim();
   const rawEnvPassword = process.env.ADMIN_PASSWORD?.trim();
   const envUser = rawEnvUser && !isPlaceholderEnv(rawEnvUser) ? rawEnvUser : '';
   const envHash = rawEnvHash && !isPlaceholderEnv(rawEnvHash) ? rawEnvHash : '';
   const envPassword = rawEnvPassword && !isPlaceholderEnv(rawEnvPassword) ? rawEnvPassword : '';
-  const allUsers = db.select().from(users).all();
 
-  if (allUsers.length === 0 && envUser && (envHash || envPassword)) {
-    const initialHash = envHash || hashPasswordScrypt(envPassword);
-    db.insert(users)
-      .values({
+  if (envUser && (envHash || envPassword)) {
+    const allUsers = await db.select().from(users);
+    if (allUsers.length === 0) {
+      const initialHash = envHash || hashPasswordScrypt(envPassword);
+      await db.insert(users).values({
         username: envUser,
         passwordHash: initialHash,
         role: 'admin',
         tokenVersion: 1,
         createdAt: now,
-      })
-      .run();
-  } else if (allUsers.length > 0 && envUser && (envHash || envPassword)) {
-    const matching = allUsers.find((u) => u.username === envUser);
-    if (matching) {
-      if (envHash && matching.passwordHash !== envHash) {
-        db.update(users)
-          .set({ passwordHash: envHash })
-          .where(eq(users.id, matching.id))
-          .run();
-      } else if (envPassword && !verifyPasswordScrypt(envPassword, matching.passwordHash)) {
-        db.update(users)
-          .set({ passwordHash: hashPasswordScrypt(envPassword) })
-          .where(eq(users.id, matching.id))
-          .run();
+      });
+    } else {
+      const matching = allUsers.find((u) => u.username === envUser);
+      if (matching) {
+        if (envHash && matching.passwordHash !== envHash) {
+          await db
+            .update(users)
+            .set({ passwordHash: envHash })
+            .where(eq(users.id, matching.id));
+        } else if (envPassword && !verifyPasswordScrypt(envPassword, matching.passwordHash)) {
+          await db
+            .update(users)
+            .set({ passwordHash: hashPasswordScrypt(envPassword) })
+            .where(eq(users.id, matching.id));
+        }
       }
     }
   }
 
-  // 3. One-time content seed
-  const seededFlag = db.select().from(settings).where(eq(settings.key, SEED_FLAG_KEY)).get();
-  if (!seededFlag) {
-    const existingCategories = db.select().from(categories).all();
+  // 6. One-time content seed
+  if (!existingKeys.has(SEED_FLAG_KEY)) {
+    const existingCategories = await db.select().from(categories);
     if (existingCategories.length === 0) {
-      const defaultCats = [
-        {
-          name: 'اقتصاد',
-          nameEn: 'Economics',
-          slug: 'اقتصاد',
-          description: 'در حال تلاش برای بهتر کردن اقتصاد همه‌مون',
-          descriptionEn: 'Working toward smarter personal and everyday economics',
-          sortOrder: 1,
-        },
-        {
-          name: 'یادگیری',
-          nameEn: 'Learning',
-          slug: 'یادگیری',
-          description: 'یادداشت‌ها و تجربه‌های عملی درباره هوش مصنوعی، اتوماسیون و سیستم‌ها',
-          descriptionEn: 'Hands-on notes and experiments on AI, automation, and software systems',
-          sortOrder: 2,
-        },
-      ];
-      for (const cat of defaultCats) {
-        db.insert(categories).values(cat).onConflictDoNothing().run();
-      }
+      await db
+        .insert(categories)
+        .values([
+          {
+            name: 'اقتصاد',
+            nameEn: 'Economics',
+            slug: 'اقتصاد',
+            description: 'در حال تلاش برای بهتر کردن اقتصاد همه‌مون',
+            descriptionEn: 'Working toward smarter personal and everyday economics',
+            sortOrder: 1,
+          },
+          {
+            name: 'یادگیری',
+            nameEn: 'Learning',
+            slug: 'یادگیری',
+            description: 'یادداشت‌ها و تجربه‌های عملی درباره هوش مصنوعی، اتوماسیون و سیستم‌ها',
+            descriptionEn:
+              'Hands-on notes and experiments on AI, automation, and software systems',
+            sortOrder: 2,
+          },
+        ])
+        .onConflictDoNothing();
     }
 
-    const existingProjects = db.select().from(projectsTable).all();
+    const existingProjects = await db.select().from(projectsTable);
     if (existingProjects.length === 0) {
-      const defaultProjects = [
+      await db.insert(projectsTable).values([
         {
           title: 'masafig.ai.studio',
           titleEn: 'masafig.ai.studio',
@@ -615,54 +713,36 @@ function seedInitialData(): void {
           periodEn: 'AI Studio',
           summary: 'نمونه پروژه واقعی طراحی و پیاده‌سازی‌شده با کمک هوش مصنوعی روی AI Studio.',
           summaryEn: 'A real-world web application designed and built with AI assistance.',
-          stack: ['AI Studio', 'Web App'],
+          stack: JSON.stringify(['AI Studio', 'Web App']),
           url: 'https://masafig.ai.studio',
           featured: 1,
           sortOrder: 1,
         },
         {
           title: 'وب‌سایت شخصی و وبلاگ',
-          titleEn: 'Personal Portfolio & Local-First Blog',
+          titleEn: 'Personal Portfolio & Serverless Blog',
           role: 'طراحی و توسعه',
           roleEn: 'Design & Full-Stack Dev',
           period: '۱۴۰۵',
           periodEn: '2026',
           summary:
-            'پورتفولیو و وبلاگ شخصی با دیتابیس محلی SQLite، آپلودر اختصاصی رسانه و پنل مدیریت سفارشی.',
+            'پورتفولیو و وبلاگ شخصی با دیتابیس libSQL/Turso، ذخیره رسانه کلودیناری و پنل مدیریت سفارشی.',
           summaryEn:
-            'Self-hosted portfolio and block-based blog powered by local SQLite, media optimization, and a custom bilingual CMS.',
-          stack: ['TypeScript', 'React', 'SQLite'],
+            'Serverless portfolio and block-based blog powered by Turso libSQL, Cloudinary media, and a custom bilingual CMS.',
+          stack: JSON.stringify(['TypeScript', 'React', 'Turso']),
           url: '/',
           featured: 1,
           sortOrder: 2,
         },
-      ];
-
-      for (const proj of defaultProjects) {
-        db.insert(projectsTable)
-          .values({
-            title: proj.title,
-            titleEn: proj.titleEn,
-            role: proj.role,
-            roleEn: proj.roleEn,
-            period: proj.period,
-            periodEn: proj.periodEn,
-            summary: proj.summary,
-            summaryEn: proj.summaryEn,
-            stack: JSON.stringify(proj.stack),
-            url: proj.url,
-            featured: proj.featured,
-            sortOrder: proj.sortOrder,
-          })
-          .run();
-      }
+      ]);
     }
 
-    const existingPosts = db.select().from(posts).all();
+    const existingPosts = await db.select().from(posts);
     const sampleBlocks = createSamplePostBlocks();
     const sampleBlocksEn = createSamplePostBlocksEn();
     if (existingPosts.length === 0) {
-      db.insert(posts)
+      await db
+        .insert(posts)
         .values({
           title: 'نوشته نمونه: امکانات کامل وبلاگ و ویرایشگر',
           titleEn: 'Sample Post: Complete Blog & Block Editor Showcase',
@@ -680,22 +760,20 @@ function seedInitialData(): void {
           createdAt: now,
           updatedAt: now,
         })
-        .onConflictDoNothing()
-        .run();
+        .onConflictDoNothing();
     }
 
-    db.insert(settings)
+    await db
+      .insert(settings)
       .values({ key: SEED_FLAG_KEY, value: '1', updatedAt: now })
       .onConflictDoUpdate({
         target: settings.key,
         set: { value: '1', updatedAt: now },
-      })
-      .run();
+      });
   }
 
-  // 4. One-time safe English backfill for pre-existing default seeded items (only fills empty *_en fields)
-  const enBackfillFlag = db.select().from(settings).where(eq(settings.key, '_bilingual_seed_v1')).get();
-  if (!enBackfillFlag) {
+  // 7. One-time safe English backfill for pre-existing seeded items
+  if (!existingKeys.has('_bilingual_seed_v1')) {
     const catDefaults: Record<string, { nameEn: string; descriptionEn: string }> = {
       اقتصاد: {
         nameEn: 'Economics',
@@ -706,76 +784,87 @@ function seedInitialData(): void {
         descriptionEn: 'Hands-on notes and experiments on AI, automation, and software systems',
       },
     };
-    for (const c of db.select().from(categories).all()) {
+    const allCats = await db.select().from(categories);
+    for (const c of allCats) {
       const def = catDefaults[c.name];
       if (def && !c.nameEn.trim()) {
-        db.update(categories)
+        await db
+          .update(categories)
           .set({
             nameEn: def.nameEn,
             descriptionEn: c.descriptionEn.trim() ? c.descriptionEn : def.descriptionEn,
           })
-          .where(eq(categories.id, c.id))
-          .run();
+          .where(eq(categories.id, c.id));
       }
     }
 
-    for (const p of db.select().from(projectsTable).all()) {
+    const allProjects = await db.select().from(projectsTable);
+    for (const p of allProjects) {
       if (p.title === 'masafig.ai.studio' && !p.titleEn.trim()) {
-        db.update(projectsTable)
+        await db
+          .update(projectsTable)
           .set({
             titleEn: 'masafig.ai.studio',
             roleEn: 'Web Application',
             periodEn: 'AI Studio',
             summaryEn: 'A real-world web application designed and built with AI assistance.',
           })
-          .where(eq(projectsTable.id, p.id))
-          .run();
+          .where(eq(projectsTable.id, p.id));
       } else if (p.title === 'وب‌سایت شخصی و وبلاگ' && !p.titleEn.trim()) {
-        db.update(projectsTable)
+        await db
+          .update(projectsTable)
           .set({
-            titleEn: 'Personal Portfolio & Local-First Blog',
+            titleEn: 'Personal Portfolio & Serverless Blog',
             roleEn: 'Design & Full-Stack Dev',
             periodEn: '2026',
             summaryEn:
-              'Self-hosted portfolio and block-based blog powered by local SQLite, media optimization, and a custom bilingual CMS.',
+              'Serverless portfolio and block-based blog powered by Turso libSQL, Cloudinary media, and a custom bilingual CMS.',
           })
-          .where(eq(projectsTable.id, p.id))
-          .run();
+          .where(eq(projectsTable.id, p.id));
       }
     }
 
-    const sampleRow = db
+    const [sampleRow] = await db
       .select()
       .from(posts)
       .where(eq(posts.slug, 'نوشته-نمونه-امکانات-وبلاگ'))
-      .get();
+      .limit(1);
     if (sampleRow && !sampleRow.titleEn.trim()) {
-      db.update(posts)
+      await db
+        .update(posts)
         .set({
           titleEn: 'Sample Post: Complete Blog & Block Editor Showcase',
           excerptEn:
             'A hands-on showcase of all editor blocks — images, video, audio, callout cards, buttons, link embeds, code blocks, quotes, and rich inline formatting.',
           blocksEn: JSON.stringify(createSamplePostBlocksEn()),
         })
-        .where(eq(posts.id, sampleRow.id))
-        .run();
+        .where(eq(posts.id, sampleRow.id));
     }
 
-    db.insert(settings)
+    await db
+      .insert(settings)
       .values({ key: '_bilingual_seed_v1', value: '1', updatedAt: now })
       .onConflictDoUpdate({
         target: settings.key,
         set: { value: '1', updatedAt: now },
-      })
-      .run();
+      });
   }
 }
 
-seedInitialData();
+export function ensureDbInitialized(): Promise<void> {
+  if (!initPromise) {
+    initPromise = runDatabaseInit().catch((err) => {
+      initPromise = null;
+      throw err;
+    });
+  }
+  return initPromise;
+}
 
 // ==================== SETTINGS ====================
-export function getSettings(): SiteSettings {
-  const rows = db.select().from(settings).all();
+export async function getSettings(): Promise<SiteSettings> {
+  await ensureDbInitialized();
+  const rows = await getDb().select().from(settings);
   const map: Record<string, string> = {};
   for (const row of rows) {
     if (row.key.startsWith('_')) continue;
@@ -787,18 +876,20 @@ export function getSettings(): SiteSettings {
   };
 }
 
-export function updateSettings(partial: Partial<SiteSettings>): SiteSettings {
+export async function updateSettings(partial: Partial<SiteSettings>): Promise<SiteSettings> {
+  await ensureDbInitialized();
+  const db = getDb();
   const now = new Date().toISOString();
   const allowedKeys = Object.keys(DEFAULT_SETTINGS) as Array<keyof SiteSettings>;
   for (const key of allowedKeys) {
     if (typeof partial[key] === 'string') {
-      db.insert(settings)
+      await db
+        .insert(settings)
         .values({ key, value: partial[key] as string, updatedAt: now })
         .onConflictDoUpdate({
           target: settings.key,
           set: { value: partial[key] as string, updatedAt: now },
-        })
-        .run();
+        });
     }
   }
   return getSettings();
@@ -810,20 +901,22 @@ const AI_MODEL_KEY = '_ai_model';
 const AI_BASE_URL_KEY = '_ai_base_url';
 const AI_API_KEY_ENC = '_ai_api_key_enc';
 
-function getInternalSetting(key: string): string {
-  const row = db.select().from(settings).where(eq(settings.key, key)).get();
+async function getInternalSetting(key: string): Promise<string> {
+  await ensureDbInitialized();
+  const [row] = await getDb().select().from(settings).where(eq(settings.key, key)).limit(1);
   return row?.value ?? '';
 }
 
-function setInternalSetting(key: string, value: string): void {
+async function setInternalSetting(key: string, value: string): Promise<void> {
+  await ensureDbInitialized();
   const now = new Date().toISOString();
-  db.insert(settings)
+  await getDb()
+    .insert(settings)
     .values({ key, value, updatedAt: now })
     .onConflictDoUpdate({
       target: settings.key,
       set: { value, updatedAt: now },
-    })
-    .run();
+    });
 }
 
 export interface ResolvedAiConfig {
@@ -843,21 +936,26 @@ const LEGACY_GEMINI_MODELS = new Set([
   'gemini-3-flash-preview',
 ]);
 
-export function getAiConfigResolved(): ResolvedAiConfig {
-  const rawProvider = getInternalSetting(AI_PROVIDER_KEY);
+export async function getAiConfigResolved(): Promise<ResolvedAiConfig> {
+  const [rawProvider, savedModelRaw, baseUrlRaw, encKey, secret] = await Promise.all([
+    getInternalSetting(AI_PROVIDER_KEY),
+    getInternalSetting(AI_MODEL_KEY),
+    getInternalSetting(AI_BASE_URL_KEY),
+    getInternalSetting(AI_API_KEY_ENC),
+    getOrCreateSessionSecret(),
+  ]);
+
   const provider: AiProviderType =
     rawProvider === 'openai_compatible' ? 'openai_compatible' : 'gemini';
   const defaultModel = provider === 'gemini' ? 'gemini-4-hydrogen' : 'gpt-4.1-mini';
-  const savedModel = getInternalSetting(AI_MODEL_KEY).trim();
+  const savedModel = savedModelRaw.trim();
   const model =
     !savedModel || (provider === 'gemini' && LEGACY_GEMINI_MODELS.has(savedModel))
       ? defaultModel
       : savedModel;
-  const baseUrl = getInternalSetting(AI_BASE_URL_KEY).trim();
-  const encKey = getInternalSetting(AI_API_KEY_ENC);
-  const customApiKey = encKey ? decryptSecret(encKey, getOrCreateSessionSecret()) : '';
+  const baseUrl = baseUrlRaw.trim();
+  const customApiKey = encKey ? decryptSecret(encKey, secret) : '';
 
-  // Security: do NOT auto-fallback to host env API keys unless admin explicitly saves a key in Admin Settings
   return {
     provider,
     model,
@@ -868,8 +966,8 @@ export function getAiConfigResolved(): ResolvedAiConfig {
   };
 }
 
-export function getAiConfigPublic(): AiConfigPublic {
-  const resolved = getAiConfigResolved();
+export async function getAiConfigPublic(): Promise<AiConfigPublic> {
+  const resolved = await getAiConfigResolved();
   const hint =
     resolved.customApiKey.length >= 6
       ? `••••${resolved.customApiKey.slice(-4)}`
@@ -888,27 +986,28 @@ export function getAiConfigPublic(): AiConfigPublic {
   };
 }
 
-export function updateAiConfig(input: {
+export async function updateAiConfig(input: {
   provider?: AiProviderType;
   model?: string;
   baseUrl?: string;
   apiKey?: string;
   clearCustomApiKey?: boolean;
-}): AiConfigPublic {
+}): Promise<AiConfigPublic> {
   if (input.provider === 'gemini' || input.provider === 'openai_compatible') {
-    setInternalSetting(AI_PROVIDER_KEY, input.provider);
+    await setInternalSetting(AI_PROVIDER_KEY, input.provider);
   }
   if (typeof input.model === 'string') {
-    setInternalSetting(AI_MODEL_KEY, input.model.trim());
+    await setInternalSetting(AI_MODEL_KEY, input.model.trim());
   }
   if (typeof input.baseUrl === 'string') {
-    setInternalSetting(AI_BASE_URL_KEY, input.baseUrl.trim());
+    await setInternalSetting(AI_BASE_URL_KEY, input.baseUrl.trim());
   }
   if (input.clearCustomApiKey) {
-    setInternalSetting(AI_API_KEY_ENC, '');
+    await setInternalSetting(AI_API_KEY_ENC, '');
   } else if (typeof input.apiKey === 'string' && input.apiKey.trim()) {
-    const encrypted = encryptSecret(input.apiKey.trim(), getOrCreateSessionSecret());
-    setInternalSetting(AI_API_KEY_ENC, encrypted);
+    const secret = await getOrCreateSessionSecret();
+    const encrypted = encryptSecret(input.apiKey.trim(), secret);
+    await setInternalSetting(AI_API_KEY_ENC, encrypted);
   }
   return getAiConfigPublic();
 }
@@ -961,22 +1060,24 @@ export function parseVCardExtraFields(jsonStr: string): VCardExtraField[] {
 }
 
 // ==================== CATEGORIES ====================
-export function listCategories(): CategoryItem[] {
-  return db
+export async function listCategories(): Promise<CategoryItem[]> {
+  await ensureDbInitialized();
+  return getDb()
     .select()
     .from(categories)
-    .orderBy(asc(categories.sortOrder), asc(categories.id))
-    .all();
+    .orderBy(asc(categories.sortOrder), asc(categories.id));
 }
 
-export function upsertCategory(input: {
+export async function upsertCategory(input: {
   id?: number;
   name: string;
   nameEn?: string;
   description: string;
   descriptionEn?: string;
   sortOrder?: number;
-}): CategoryItem {
+}): Promise<CategoryItem> {
+  await ensureDbInitialized();
+  const db = getDb();
   const cleanName = input.name.trim();
   const cleanNameEn = (input.nameEn ?? '').trim();
   const cleanDesc = input.description.trim();
@@ -984,8 +1085,14 @@ export function upsertCategory(input: {
   const slug = slugifyPersian(cleanName);
 
   if (input.id) {
-    const previous = db.select().from(categories).where(eq(categories.id, input.id)).get();
-    db.update(categories)
+    const [previous] = await db
+      .select()
+      .from(categories)
+      .where(eq(categories.id, input.id))
+      .limit(1);
+
+    const [updated] = await db
+      .update(categories)
       .set({
         name: cleanName,
         nameEn: cleanNameEn,
@@ -995,20 +1102,21 @@ export function upsertCategory(input: {
         sortOrder: input.sortOrder ?? previous?.sortOrder ?? 0,
       })
       .where(eq(categories.id, input.id))
-      .run();
+      .returning();
 
     if (previous && previous.name !== cleanName) {
-      db.update(posts)
+      await db
+        .update(posts)
         .set({ category: cleanName })
-        .where(eq(posts.category, previous.name))
-        .run();
+        .where(eq(posts.category, previous.name));
     }
 
-    return db.select().from(categories).where(eq(categories.id, input.id)).get()!;
+    return updated;
   }
 
-  const nextOrder = input.sortOrder ?? listCategories().length + 1;
-  const info = db
+  const existingCats = await listCategories();
+  const nextOrder = input.sortOrder ?? existingCats.length + 1;
+  const [inserted] = await db
     .insert(categories)
     .values({
       name: cleanName,
@@ -1018,32 +1126,35 @@ export function upsertCategory(input: {
       descriptionEn: cleanDescEn,
       sortOrder: nextOrder,
     })
-    .run();
-  return db
-    .select()
-    .from(categories)
-    .where(eq(categories.id, Number(info.lastInsertRowid)))
-    .get()!;
+    .returning();
+
+  return inserted;
 }
 
-export function reorderCategories(orderedIds: number[]): CategoryItem[] {
-  const tx = sqlite.transaction((ids: number[]) => {
-    ids.forEach((id, idx) => {
+export async function reorderCategories(orderedIds: number[]): Promise<CategoryItem[]> {
+  await ensureDbInitialized();
+  const db = getDb();
+  await db.transaction(async (tx) => {
+    for (let idx = 0; idx < orderedIds.length; idx++) {
+      const id = orderedIds[idx];
       if (Number.isInteger(id) && id > 0) {
-        db.update(categories)
+        await tx
+          .update(categories)
           .set({ sortOrder: idx + 1 })
-          .where(eq(categories.id, id))
-          .run();
+          .where(eq(categories.id, id));
       }
-    });
+    }
   });
-  tx(orderedIds);
   return listCategories();
 }
 
-export function deleteCategory(id: number): boolean {
-  const res = db.delete(categories).where(eq(categories.id, id)).run();
-  return res.changes > 0;
+export async function deleteCategory(id: number): Promise<boolean> {
+  await ensureDbInitialized();
+  const deleted = await getDb()
+    .delete(categories)
+    .where(eq(categories.id, id))
+    .returning({ id: categories.id });
+  return deleted.length > 0;
 }
 
 // ==================== POSTS ====================
@@ -1068,32 +1179,40 @@ function mapPostRow(row: typeof posts.$inferSelect): BlogPost {
   };
 }
 
-export function listPosts(includeDrafts = false): BlogPost[] {
+export async function listPosts(includeDrafts = false): Promise<BlogPost[]> {
+  await ensureDbInitialized();
+  const db = getDb();
   const rows = includeDrafts
-    ? db.select().from(posts).orderBy(desc(posts.createdAt)).all()
-    : db.select().from(posts).where(eq(posts.published, 1)).orderBy(desc(posts.createdAt)).all();
+    ? await db.select().from(posts).orderBy(desc(posts.createdAt))
+    : await db
+        .select()
+        .from(posts)
+        .where(eq(posts.published, 1))
+        .orderBy(desc(posts.createdAt));
   return rows.map(mapPostRow);
 }
 
-export function getPostBySlug(slug: string, includeDrafts = false): BlogPost | null {
+export async function getPostBySlug(slug: string, includeDrafts = false): Promise<BlogPost | null> {
+  await ensureDbInitialized();
   let decoded = slug;
   try {
     decoded = decodeURIComponent(slug);
   } catch {
     decoded = slug;
   }
-  const row = db.select().from(posts).where(eq(posts.slug, decoded)).get();
+  const [row] = await getDb().select().from(posts).where(eq(posts.slug, decoded)).limit(1);
   if (!row) return null;
   if (!includeDrafts && !row.published) return null;
   return mapPostRow(row);
 }
 
-export function getPostById(id: number): BlogPost | null {
-  const row = db.select().from(posts).where(eq(posts.id, id)).get();
+export async function getPostById(id: number): Promise<BlogPost | null> {
+  await ensureDbInitialized();
+  const [row] = await getDb().select().from(posts).where(eq(posts.id, id)).limit(1);
   return row ? mapPostRow(row) : null;
 }
 
-export function upsertPost(input: {
+export async function upsertPost(input: {
   id?: number;
   title: string;
   titleEn?: string;
@@ -1105,7 +1224,9 @@ export function upsertPost(input: {
   blocks: ContentBlock[];
   blocksEn?: ContentBlock[];
   published: boolean;
-}): BlogPost {
+}): Promise<BlogPost> {
+  await ensureDbInitialized();
+  const db = getDb();
   const now = new Date().toISOString();
   const baseSlug = slugifyPersian(input.slug?.trim() || input.title);
   const readingMinutes = estimateReadingMinutes(input.blocks);
@@ -1117,12 +1238,17 @@ export function upsertPost(input: {
     let candidateSlug = baseSlug;
     let suffix = 2;
     while (true) {
-      const conflict = db.select().from(posts).where(eq(posts.slug, candidateSlug)).get();
+      const [conflict] = await db
+        .select()
+        .from(posts)
+        .where(eq(posts.slug, candidateSlug))
+        .limit(1);
       if (!conflict || conflict.id === input.id) break;
       candidateSlug = `${baseSlug}-${suffix++}`;
     }
 
-    db.update(posts)
+    const [updated] = await db
+      .update(posts)
       .set({
         title: input.title,
         titleEn,
@@ -1138,17 +1264,24 @@ export function upsertPost(input: {
         updatedAt: now,
       })
       .where(eq(posts.id, input.id))
-      .run();
-    return getPostById(input.id)!;
+      .returning();
+
+    return mapPostRow(updated);
   }
 
   let candidateSlug = baseSlug;
   let suffix = 2;
-  while (db.select().from(posts).where(eq(posts.slug, candidateSlug)).get()) {
+  while (true) {
+    const [conflict] = await db
+      .select({ id: posts.id })
+      .from(posts)
+      .where(eq(posts.slug, candidateSlug))
+      .limit(1);
+    if (!conflict) break;
     candidateSlug = `${baseSlug}-${suffix++}`;
   }
 
-  const info = db
+  const [inserted] = await db
     .insert(posts)
     .values({
       title: input.title,
@@ -1165,52 +1298,58 @@ export function upsertPost(input: {
       createdAt: now,
       updatedAt: now,
     })
-    .run();
+    .returning();
 
-  return getPostById(Number(info.lastInsertRowid))!;
+  return mapPostRow(inserted);
 }
 
-export function deletePost(id: number): boolean {
-  const res = db.delete(posts).where(eq(posts.id, id)).run();
-  return res.changes > 0;
+export async function deletePost(id: number): Promise<boolean> {
+  await ensureDbInitialized();
+  const deleted = await getDb()
+    .delete(posts)
+    .where(eq(posts.id, id))
+    .returning({ id: posts.id });
+  return deleted.length > 0;
 }
 
 // ==================== PROJECTS ====================
-export function listProjects(): ProjectItem[] {
-  const rows = db
-    .select()
-    .from(projectsTable)
-    .orderBy(asc(projectsTable.sortOrder), desc(projectsTable.id))
-    .all();
-  return rows.map((row) => {
-    let stack: string[] = [];
-    try {
-      const parsed = JSON.parse(row.stack);
-      if (Array.isArray(parsed)) {
-        stack = parsed.filter((s): s is string => typeof s === 'string');
-      }
-    } catch {
-      stack = [];
+function mapProjectRow(row: typeof projectsTable.$inferSelect): ProjectItem {
+  let stack: string[] = [];
+  try {
+    const parsed = JSON.parse(row.stack);
+    if (Array.isArray(parsed)) {
+      stack = parsed.filter((s): s is string => typeof s === 'string');
     }
-    return {
-      id: row.id,
-      title: row.title,
-      titleEn: row.titleEn || '',
-      role: row.role,
-      roleEn: row.roleEn || '',
-      period: row.period,
-      periodEn: row.periodEn || '',
-      summary: row.summary,
-      summaryEn: row.summaryEn || '',
-      stack,
-      url: row.url,
-      featured: Boolean(row.featured),
-      sortOrder: row.sortOrder,
-    };
-  });
+  } catch {
+    stack = [];
+  }
+  return {
+    id: row.id,
+    title: row.title,
+    titleEn: row.titleEn || '',
+    role: row.role,
+    roleEn: row.roleEn || '',
+    period: row.period,
+    periodEn: row.periodEn || '',
+    summary: row.summary,
+    summaryEn: row.summaryEn || '',
+    stack,
+    url: row.url,
+    featured: Boolean(row.featured),
+    sortOrder: row.sortOrder,
+  };
 }
 
-export function upsertProject(
+export async function listProjects(): Promise<ProjectItem[]> {
+  await ensureDbInitialized();
+  const rows = await getDb()
+    .select()
+    .from(projectsTable)
+    .orderBy(asc(projectsTable.sortOrder), desc(projectsTable.id));
+  return rows.map(mapProjectRow);
+}
+
+export async function upsertProject(
   input: Omit<ProjectItem, 'id' | 'titleEn' | 'roleEn' | 'periodEn' | 'summaryEn'> & {
     id?: number;
     titleEn?: string;
@@ -1218,8 +1357,11 @@ export function upsertProject(
     periodEn?: string;
     summaryEn?: string;
   },
-): ProjectItem {
-  const existing = input.id ? listProjects().find((p) => p.id === input.id) : undefined;
+): Promise<ProjectItem> {
+  await ensureDbInitialized();
+  const db = getDb();
+  const all = await listProjects();
+  const existing = input.id ? all.find((p) => p.id === input.id) : undefined;
   const payload = {
     title: input.title,
     titleEn: (input.titleEn ?? '').trim(),
@@ -1232,47 +1374,145 @@ export function upsertProject(
     stack: JSON.stringify(input.stack),
     url: input.url,
     featured: input.featured ? 1 : 0,
-    sortOrder: input.sortOrder ?? existing?.sortOrder ?? listProjects().length + 1,
+    sortOrder: input.sortOrder ?? existing?.sortOrder ?? all.length + 1,
   };
 
   if (input.id) {
-    db.update(projectsTable).set(payload).where(eq(projectsTable.id, input.id)).run();
-    return listProjects().find((p) => p.id === input.id)!;
+    const [updated] = await db
+      .update(projectsTable)
+      .set(payload)
+      .where(eq(projectsTable.id, input.id))
+      .returning();
+    return mapProjectRow(updated);
   }
 
-  const info = db.insert(projectsTable).values(payload).run();
-  return listProjects().find((p) => p.id === Number(info.lastInsertRowid))!;
+  const [inserted] = await db.insert(projectsTable).values(payload).returning();
+  return mapProjectRow(inserted);
 }
 
-export function reorderProjects(orderedIds: number[]): ProjectItem[] {
-  const tx = sqlite.transaction((ids: number[]) => {
-    ids.forEach((id, idx) => {
+export async function reorderProjects(orderedIds: number[]): Promise<ProjectItem[]> {
+  await ensureDbInitialized();
+  const db = getDb();
+  await db.transaction(async (tx) => {
+    for (let idx = 0; idx < orderedIds.length; idx++) {
+      const id = orderedIds[idx];
       if (Number.isInteger(id) && id > 0) {
-        db.update(projectsTable)
+        await tx
+          .update(projectsTable)
           .set({ sortOrder: idx + 1 })
-          .where(eq(projectsTable.id, id))
-          .run();
+          .where(eq(projectsTable.id, id));
       }
-    });
+    }
   });
-  tx(orderedIds);
   return listProjects();
 }
 
-export function deleteProject(id: number): boolean {
-  const res = db.delete(projectsTable).where(eq(projectsTable.id, id)).run();
-  return res.changes > 0;
+export async function deleteProject(id: number): Promise<boolean> {
+  await ensureDbInitialized();
+  const deleted = await getDb()
+    .delete(projectsTable)
+    .where(eq(projectsTable.id, id))
+    .returning({ id: projectsTable.id });
+  return deleted.length > 0;
+}
+
+// ==================== MEDIA ASSETS (CLOUDINARY METADATA IN TURSO) ====================
+export interface StoredMediaAsset extends UploadedMediaItem {
+  publicId: string;
+  resourceType: 'image' | 'video' | 'raw';
+}
+
+export async function recordMediaAsset(input: {
+  publicId: string;
+  filename: string;
+  url: string;
+  kind: 'image' | 'video' | 'audio' | 'file';
+  resourceType: 'image' | 'video' | 'raw';
+  sizeBytes: number;
+}): Promise<StoredMediaAsset> {
+  await ensureDbInitialized();
+  const now = new Date().toISOString();
+  await getDb()
+    .insert(mediaAssets)
+    .values({
+      publicId: input.publicId,
+      filename: input.filename,
+      url: input.url,
+      kind: input.kind,
+      resourceType: input.resourceType,
+      sizeBytes: input.sizeBytes,
+      createdAt: now,
+    })
+    .onConflictDoUpdate({
+      target: mediaAssets.publicId,
+      set: {
+        filename: input.filename,
+        url: input.url,
+        kind: input.kind,
+        resourceType: input.resourceType,
+        sizeBytes: input.sizeBytes,
+      },
+    });
+
+  return {
+    publicId: input.publicId,
+    filename: input.filename,
+    url: input.url,
+    kind: input.kind,
+    resourceType: input.resourceType,
+    sizeBytes: input.sizeBytes,
+  };
+}
+
+export async function listMediaAssets(): Promise<UploadedMediaItem[]> {
+  await ensureDbInitialized();
+  const rows = await getDb()
+    .select()
+    .from(mediaAssets)
+    .orderBy(desc(mediaAssets.createdAt), desc(mediaAssets.id));
+  return rows.map((row) => ({
+    filename: row.publicId,
+    url: row.url,
+    kind:
+      row.kind === 'video' || row.kind === 'audio' || row.kind === 'file' ? row.kind : 'image',
+    sizeBytes: row.sizeBytes,
+  }));
+}
+
+export async function findMediaAsset(
+  key: string,
+): Promise<{ publicId: string; resourceType: 'image' | 'video' | 'raw' } | null> {
+  await ensureDbInitialized();
+  const [row] = await getDb()
+    .select()
+    .from(mediaAssets)
+    .where(or(eq(mediaAssets.publicId, key), eq(mediaAssets.filename, key)))
+    .limit(1);
+  if (!row) return null;
+  const resourceType =
+    row.resourceType === 'video' || row.resourceType === 'raw' ? row.resourceType : 'image';
+  return { publicId: row.publicId, resourceType };
+}
+
+export async function deleteMediaAssetRecord(key: string): Promise<boolean> {
+  await ensureDbInitialized();
+  const deleted = await getDb()
+    .delete(mediaAssets)
+    .where(or(eq(mediaAssets.publicId, key), eq(mediaAssets.filename, key)))
+    .returning({ id: mediaAssets.id });
+  return deleted.length > 0;
 }
 
 // ==================== MESSAGES ====================
-export function createMessage(input: {
+export async function createMessage(input: {
   name: string;
   contact: string;
   subject: string;
   message: string;
-}): ContactMessage {
+}): Promise<ContactMessage> {
+  await ensureDbInitialized();
   const now = new Date().toISOString();
-  const info = db
+  const [row] = await getDb()
     .insert(messages)
     .values({
       name: input.name,
@@ -1282,49 +1522,55 @@ export function createMessage(input: {
       read: 0,
       createdAt: now,
     })
-    .run();
-  const row = db
-    .select()
-    .from(messages)
-    .where(eq(messages.id, Number(info.lastInsertRowid)))
-    .get()!;
+    .returning();
+
   return {
     ...row,
     read: Boolean(row.read),
   };
 }
 
-export function listMessages(): ContactMessage[] {
-  return db
-    .select()
-    .from(messages)
-    .orderBy(desc(messages.createdAt))
-    .all()
-    .map((m) => ({ ...m, read: Boolean(m.read) }));
+export async function listMessages(): Promise<ContactMessage[]> {
+  await ensureDbInitialized();
+  const rows = await getDb().select().from(messages).orderBy(desc(messages.createdAt));
+  return rows.map((m) => ({ ...m, read: Boolean(m.read) }));
 }
 
-export function markMessageRead(id: number, read: boolean): boolean {
-  const res = db
+export async function markMessageRead(id: number, read: boolean): Promise<boolean> {
+  await ensureDbInitialized();
+  const updated = await getDb()
     .update(messages)
     .set({ read: read ? 1 : 0 })
     .where(eq(messages.id, id))
-    .run();
-  return res.changes > 0;
+    .returning({ id: messages.id });
+  return updated.length > 0;
 }
 
-export function deleteMessage(id: number): boolean {
-  const res = db.delete(messages).where(eq(messages.id, id)).run();
-  return res.changes > 0;
+export async function deleteMessage(id: number): Promise<boolean> {
+  await ensureDbInitialized();
+  const deleted = await getDb()
+    .delete(messages)
+    .where(eq(messages.id, id))
+    .returning({ id: messages.id });
+  return deleted.length > 0;
 }
 
 // ==================== ADMIN AUTH & SECURITY ====================
-export function authenticateAdminUser(username: string, password: string): {
+export async function authenticateAdminUser(
+  username: string,
+  password: string,
+): Promise<{
   id: number;
   username: string;
   role: string;
   tokenVersion: number;
-} | null {
-  const row = db.select().from(users).where(eq(users.username, username.trim())).get();
+} | null> {
+  await ensureDbInitialized();
+  const [row] = await getDb()
+    .select()
+    .from(users)
+    .where(eq(users.username, username.trim()))
+    .limit(1);
   if (!row) return null;
   if (!verifyPasswordScrypt(password, row.passwordHash)) return null;
   return {
@@ -1335,13 +1581,14 @@ export function authenticateAdminUser(username: string, password: string): {
   };
 }
 
-export function getAdminUserByUsername(username: string): {
+export async function getAdminUserByUsername(username: string): Promise<{
   id: number;
   username: string;
   role: string;
   tokenVersion: number;
-} | null {
-  const row = db.select().from(users).where(eq(users.username, username)).get();
+} | null> {
+  await ensureDbInitialized();
+  const [row] = await getDb().select().from(users).where(eq(users.username, username)).limit(1);
   if (!row) return null;
   return {
     id: row.id,
@@ -1351,15 +1598,22 @@ export function getAdminUserByUsername(username: string): {
   };
 }
 
-export function changeAdminCredentials(input: {
+export async function changeAdminCredentials(input: {
   currentUsername: string;
   currentPassword: string;
   newUsername?: string;
   newPassword?: string;
-}):
+}): Promise<
   | { ok: true; user: { id: number; username: string; role: string; tokenVersion: number } }
-  | { ok: false; error: string } {
-  const row = db.select().from(users).where(eq(users.username, input.currentUsername)).get();
+  | { ok: false; error: string }
+> {
+  await ensureDbInitialized();
+  const db = getDb();
+  const [row] = await db
+    .select()
+    .from(users)
+    .where(eq(users.username, input.currentUsername))
+    .limit(1);
   if (!row || !verifyPasswordScrypt(input.currentPassword, row.passwordHash)) {
     return { ok: false, error: 'رمز عبور فعلی اشتباه است.' };
   }
@@ -1370,7 +1624,11 @@ export function changeAdminCredentials(input: {
   }
 
   if (nextUsername !== row.username) {
-    const conflict = db.select().from(users).where(eq(users.username, nextUsername)).get();
+    const [conflict] = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.username, nextUsername))
+      .limit(1);
     if (conflict) {
       return { ok: false, error: 'این نام کاربری قبلاً استفاده شده است.' };
     }
@@ -1379,14 +1637,14 @@ export function changeAdminCredentials(input: {
   const nextHash = input.newPassword ? hashPasswordScrypt(input.newPassword) : row.passwordHash;
   const nextVersion = (row.tokenVersion || 1) + 1;
 
-  db.update(users)
+  await db
+    .update(users)
     .set({
       username: nextUsername,
       passwordHash: nextHash,
       tokenVersion: nextVersion,
     })
-    .where(eq(users.id, row.id))
-    .run();
+    .where(eq(users.id, row.id));
 
   return {
     ok: true,
@@ -1399,29 +1657,33 @@ export function changeAdminCredentials(input: {
   };
 }
 
-export function hasAnyAdminUser(): boolean {
-  const row = db.select({ id: users.id }).from(users).limit(1).get();
+export async function hasAnyAdminUser(): Promise<boolean> {
+  await ensureDbInitialized();
+  const [row] = await getDb().select({ id: users.id }).from(users).limit(1);
   return Boolean(row);
 }
 
-export function setupFirstAdminUser(input: {
+export async function setupFirstAdminUser(input: {
   username: string;
   password: string;
-}):
+}): Promise<
   | { ok: true; user: { id: number; username: string; role: string; tokenVersion: number } }
-  | { ok: false; error: string } {
+  | { ok: false; error: string }
+> {
+  await ensureDbInitialized();
   const cleanUser = input.username.trim();
   if (cleanUser.length < 3 || !/^[a-zA-Z0-9._-]+$/.test(cleanUser)) {
     return { ok: false, error: 'نام کاربری باید حداقل ۳ کاراکتر انگلیسی، عدد یا نقطه باشد.' };
   }
 
-  const runTx = sqlite.transaction(() => {
-    const existing = db.select({ id: users.id }).from(users).limit(1).get();
+  const db = getDb();
+  return db.transaction(async (tx) => {
+    const [existing] = await tx.select({ id: users.id }).from(users).limit(1);
     if (existing) {
       return { ok: false as const, error: 'حساب مدیر قبلاً راه‌اندازی شده است.' };
     }
     const now = new Date().toISOString();
-    const info = db
+    const [inserted] = await tx
       .insert(users)
       .values({
         username: cleanUser,
@@ -1430,27 +1692,27 @@ export function setupFirstAdminUser(input: {
         tokenVersion: 1,
         createdAt: now,
       })
-      .run();
+      .returning();
     return {
       ok: true as const,
       user: {
-        id: Number(info.lastInsertRowid),
+        id: inserted.id,
         username: cleanUser,
         role: 'admin',
         tokenVersion: 1,
       },
     };
   });
-
-  return runTx();
 }
 
-export function bumpAdminTokenVersion(username: string): boolean {
-  const row = db.select().from(users).where(eq(users.username, username)).get();
+export async function bumpAdminTokenVersion(username: string): Promise<boolean> {
+  await ensureDbInitialized();
+  const db = getDb();
+  const [row] = await db.select().from(users).where(eq(users.username, username)).limit(1);
   if (!row) return false;
-  db.update(users)
+  await db
+    .update(users)
     .set({ tokenVersion: (row.tokenVersion || 1) + 1 })
-    .where(eq(users.id, row.id))
-    .run();
+    .where(eq(users.id, row.id));
   return true;
 }

@@ -86,16 +86,22 @@ export function formatReadingTime(minutes: number, lang: SiteLanguage): string {
 
 const ENGLISH_SOCIAL_LABELS: Record<string, string> = {
   telegram: 'Telegram',
-  email: 'Email',
   bale: 'Bale',
-  github: 'GitHub',
+  eitaa: 'Eitaa',
+  rubika: 'Rubika',
+  whatsapp: 'WhatsApp',
   instagram: 'Instagram',
   youtube: 'YouTube',
-  linkedin: 'LinkedIn',
-  x: 'X',
-  whatsapp: 'WhatsApp',
-  eitaa: 'Eitaa',
   aparat: 'Aparat',
+  x: 'X (Twitter)',
+  github: 'GitHub',
+  linkedin: 'LinkedIn',
+  discord: 'Discord',
+  virgool: 'Virgool',
+  spotify: 'Spotify',
+  email: 'Email',
+  phone: 'Phone',
+  globe: 'Website',
   website: 'Website',
 };
 

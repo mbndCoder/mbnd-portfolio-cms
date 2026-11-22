@@ -67,3 +67,14 @@ export const users = sqliteTable('users', {
   tokenVersion: integer('token_version').notNull().default(1),
   createdAt: text('created_at').notNull(),
 });
+
+export const mediaAssets = sqliteTable('media_assets', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  publicId: text('public_id').notNull().unique(),
+  filename: text('filename').notNull(),
+  url: text('url').notNull(),
+  kind: text('kind').notNull().default('image'),
+  resourceType: text('resource_type').notNull().default('image'),
+  sizeBytes: integer('size_bytes').notNull().default(0),
+  createdAt: text('created_at').notNull(),
+});

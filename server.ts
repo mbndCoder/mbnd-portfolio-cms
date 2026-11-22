@@ -18,6 +18,7 @@ import {
   deleteMessage,
   deletePost,
   deleteProject,
+  ensureDbInitialized,
   getAdminUserByUsername,
   getAiConfigPublic,
   getOrCreateSessionSecret,
@@ -57,14 +58,12 @@ import {
 import {
   deleteUploadedMedia,
   listUploadedMedia,
-  optimizeUploadedMedia,
-  UPLOAD_DIR,
+  uploadMediaToCloudinary,
   uploadMiddleware,
 } from './server/uploads.ts';
 import { normalizeBlocks } from './src/lib/blocks.ts';
 
 const execFileAsync = promisify(execFile);
-
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 function resolvePort(): number {
@@ -73,13 +72,14 @@ function resolvePort(): number {
     const parsed = Number(process.argv[portFlagIdx + 1]);
     if (Number.isInteger(parsed) && parsed > 0) return parsed;
   }
-  const appPort = Number(process.env.APP_PORT);
+  const appPort = Number(process.env.APP_PORT || process.env.PORT);
   if (Number.isInteger(appPort) && appPort > 0) return appPort;
   return 3000;
 }
 
 const PORT = resolvePort();
-const IS_PROD = process.env.NODE_ENV === 'production';
+const IS_VERCEL = process.env.VERCEL === '1';
+const IS_PROD = process.env.NODE_ENV === 'production' || IS_VERCEL;
 
 const RAW_ADMIN_ROUTE = (process.env.ADMIN_ROUTE || '').trim();
 const ADMIN_ROUTE =
@@ -87,7 +87,6 @@ const ADMIN_ROUTE =
     ? RAW_ADMIN_ROUTE.replace(/^\/+|\/+$/g, '')
     : '';
 
-const SESSION_SECRET = getOrCreateSessionSecret();
 const COOKIE_NAME = 'mbnd_session';
 
 const loginAttempts = new Map<string, { count: number; resetAt: number }>();
@@ -221,17 +220,19 @@ function extractSessionToken(req: express.Request): { token: string; viaBearer: 
   return { token: typeof cookieToken === 'string' ? cookieToken : '', viaBearer: false };
 }
 
-function verifyActiveAdminSession(req: express.Request): {
+async function verifyActiveAdminSession(req: express.Request): Promise<{
   username: string;
   role: string;
   tokenVersion: number;
   viaBearer: boolean;
-} | null {
+} | null> {
   const { token, viaBearer } = extractSessionToken(req);
-  const session = verifySessionToken(token, SESSION_SECRET);
+  if (!token) return null;
+  const secret = await getOrCreateSessionSecret();
+  const session = verifySessionToken(token, secret);
   if (!session || session.role !== 'admin') return null;
 
-  const dbUser = getAdminUserByUsername(session.username);
+  const dbUser = await getAdminUserByUsername(session.username);
   if (!dbUser || dbUser.tokenVersion !== session.ver) {
     return null;
   }
@@ -267,72 +268,106 @@ type AuthedRequest = express.Request & {
   adminUser?: { username: string; role: string; tokenVersion: number };
 };
 
-function requireAdmin(
+async function requireAdmin(
   req: express.Request,
   res: express.Response,
   next: express.NextFunction,
-): void {
-  const active = verifyActiveAdminSession(req);
-  if (!active) {
-    res.status(401).json({ error: 'احراز هویت انجام نشده است یا نشست منقضی شده.' });
-    return;
+): Promise<void> {
+  try {
+    const active = await verifyActiveAdminSession(req);
+    if (!active) {
+      res.status(401).json({ error: 'احراز هویت انجام نشده است یا نشست منقضی شده.' });
+      return;
+    }
+    const isMutation = !['GET', 'HEAD', 'OPTIONS'].includes(req.method.toUpperCase());
+    if (isMutation && !active.viaBearer && !passesCsrfCheck(req)) {
+      res.status(403).json({ error: 'درخواست نامعتبر است (خطای امنیتی مبدا).' });
+      return;
+    }
+    (req as AuthedRequest).adminUser = {
+      username: active.username,
+      role: active.role,
+      tokenVersion: active.tokenVersion,
+    };
+    next();
+  } catch (err) {
+    next(err);
   }
-  const isMutation = !['GET', 'HEAD', 'OPTIONS'].includes(req.method.toUpperCase());
-  if (isMutation && !active.viaBearer && !passesCsrfCheck(req)) {
-    res.status(403).json({ error: 'درخواست نامعتبر است (خطای امنیتی مبدا).' });
-    return;
-  }
-  (req as AuthedRequest).adminUser = {
-    username: active.username,
-    role: active.role,
-    tokenVersion: active.tokenVersion,
-  };
-  next();
 }
 
-const vcardAvatarCache = new Map<string, { mtimeMs: number; base64: string }>();
+const vcardAvatarCache = new Map<string, { cachedAt: number; base64: string }>();
+
+function resolveExistingFile(relativePaths: string[]): string {
+  const roots = [__dirname, process.cwd()];
+  for (const root of roots) {
+    for (const rel of relativePaths) {
+      const candidate = path.resolve(root, rel);
+      if (candidate.startsWith(root + path.sep) && fs.existsSync(candidate)) {
+        return candidate;
+      }
+    }
+  }
+  return '';
+}
 
 async function resolveVCardAvatarBase64(avatarSetting: string): Promise<string> {
-  const publicDir = path.resolve(__dirname, 'public');
-  const uploadRoot = path.resolve(UPLOAD_DIR);
   const cleaned = avatarSetting.trim();
 
-  let targetPath = '';
-  if (cleaned.startsWith('/uploads/')) {
-    const safeName = path.basename(cleaned.slice('/uploads/'.length));
-    const candidate = path.resolve(uploadRoot, safeName);
-    if (candidate.startsWith(uploadRoot + path.sep) && fs.existsSync(candidate)) {
-      targetPath = candidate;
-    }
-  } else if (cleaned.startsWith('/') && !cleaned.includes('..')) {
-    const candidate = path.resolve(publicDir, cleaned.replace(/^\/+/, ''));
-    if (candidate.startsWith(publicDir + path.sep) && fs.existsSync(candidate)) {
-      targetPath = candidate;
+  // 1. Cloudinary HTTPS avatar (strictly allowlisted host to prevent SSRF)
+  if (cleaned.startsWith('https://')) {
+    try {
+      const parsed = new URL(cleaned);
+      if (parsed.hostname === 'res.cloudinary.com') {
+        const cached = vcardAvatarCache.get(cleaned);
+        if (cached && Date.now() - cached.cachedAt < 10 * 60 * 1000) {
+          return cached.base64;
+        }
+        const transformedUrl = cleaned.includes('/image/upload/')
+          ? cleaned.replace('/image/upload/', '/image/upload/w_320,h_320,c_fill,f_jpg,q_auto/')
+          : cleaned;
+        const resp = await fetch(transformedUrl, {
+          signal: AbortSignal.timeout(5000),
+        });
+        if (resp.ok) {
+          const buf = Buffer.from(await resp.arrayBuffer());
+          if (buf.length > 0 && buf.length <= 2 * 1024 * 1024) {
+            const base64 = buf.toString('base64');
+            vcardAvatarCache.set(cleaned, { cachedAt: Date.now(), base64 });
+            return base64;
+          }
+        }
+      }
+    } catch {
+      // fall back to default static avatar
     }
   }
 
-  if (!targetPath) {
-    const defaultAvatar = path.resolve(publicDir, 'vcard-avatar.jpg');
-    if (fs.existsSync(defaultAvatar)) {
-      targetPath = defaultAvatar;
-    }
+  // 2. Static repo avatar inside public/ or dist/
+  const candidates: string[] = [];
+  if (cleaned.startsWith('/') && !cleaned.includes('..')) {
+    const safeRel = cleaned.replace(/^\/+/, '');
+    candidates.push(path.join('public', safeRel), path.join('dist', safeRel));
   }
+  candidates.push('public/vcard-avatar.jpg', 'dist/vcard-avatar.jpg');
 
+  const targetPath = resolveExistingFile(candidates);
   if (!targetPath) return '';
 
   try {
     const stat = fs.statSync(targetPath);
-    const cached = vcardAvatarCache.get(targetPath);
-    if (cached && cached.mtimeMs === stat.mtimeMs) {
-      return cached.base64;
-    }
+    const cacheKey = `${targetPath}:${stat.mtimeMs}`;
+    const cached = vcardAvatarCache.get(cacheKey);
+    if (cached) return cached.base64;
 
     const ext = path.extname(targetPath).toLowerCase();
     let jpgBuffer: Buffer;
     if (ext === '.jpg' || ext === '.jpeg') {
       jpgBuffer = fs.readFileSync(targetPath);
-    } else {
-      const tmpJpg = path.join(os.tmpdir(), `mbnd-vcard-${Date.now()}-${Math.random().toString(36).slice(2)}.jpg`);
+    } else if (!IS_VERCEL) {
+      const tmpJpg = path.join(
+        os.tmpdir(),
+        `mbnd-vcard-${Date.now()}-${Math.random().toString(36).slice(2)}.jpg`,
+      );
       try {
         await execFileAsync(
           'ffmpeg',
@@ -352,32 +387,73 @@ async function resolveVCardAvatarBase64(avatarSetting: string): Promise<string> 
       } finally {
         if (fs.existsSync(tmpJpg)) fs.unlinkSync(tmpJpg);
       }
+    } else {
+      return '';
     }
 
     const base64 = jpgBuffer.toString('base64');
-    vcardAvatarCache.set(targetPath, { mtimeMs: stat.mtimeMs, base64 });
+    vcardAvatarCache.set(cacheKey, { cachedAt: Date.now(), base64 });
     return base64;
   } catch {
     return '';
   }
 }
 
-async function startServer(): Promise<void> {
-  const app = express();
-  app.set('trust proxy', 1);
-  app.disable('x-powered-by');
-  app.use(express.json({ limit: '5mb' }));
-  app.use(cookieParser());
+function blocksToPlainMarkdown(blocks: ReturnType<typeof normalizeBlocks>): string {
+  return blocks
+    .map((block) => {
+      switch (block.type) {
+        case 'h2':
+          return `## ${block.text}`;
+        case 'h3':
+          return `### ${block.text}`;
+        case 'paragraph':
+          return block.text;
+        case 'quote':
+          return `> ${block.text}${block.author ? ` — ${block.author}` : ''}`;
+        case 'list':
+          return block.items
+            .map((item, i) => (block.ordered ? `${i + 1}. ${item}` : `- ${item}`))
+            .join('\n');
+        case 'code':
+          return `\`\`\`${block.language || ''}\n${block.code}\n\`\`\``;
+        case 'card':
+          return `**${block.title}**: ${block.body}`;
+        case 'embed':
+          return `[${block.title}](${block.url})${block.description ? ` — ${block.description}` : ''}`;
+        case 'button':
+          return `[${block.label}](${block.url})`;
+        case 'image':
+          return block.caption || block.alt ? `Image: ${block.caption || block.alt}` : '';
+        case 'video':
+          return block.caption ? `Video: ${block.caption}` : '';
+        case 'audio':
+          return block.title ? `Audio: ${block.title}` : '';
+        default:
+          return '';
+      }
+    })
+    .filter(Boolean)
+    .join('\n\n');
+}
 
-  // Security headers
-  app.use((_req, res, next) => {
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
-    next();
-  });
+// ==================== EXPRESS APP (SERVERLESS + LOCAL) ====================
+export const app = express();
+app.set('trust proxy', 1);
+app.disable('x-powered-by');
+app.use(express.json({ limit: '5mb' }));
+app.use(cookieParser());
 
-  // Lightweight native gzip/br compression for weak/slow connections (zero extra packages)
+// Security headers
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  next();
+});
+
+// Lightweight native gzip/br compression when running outside Vercel Edge (Vercel compresses automatically)
+if (!IS_VERCEL) {
   app.use((req, res, next) => {
     const accept = String(req.headers['accept-encoding'] || '');
     const supportsBr = accept.includes('br');
@@ -439,17 +515,19 @@ async function startServer(): Promise<void> {
 
     next();
   });
+}
 
-  app.get('/favicon.ico', (_req, res) => {
-    const favPath = path.resolve(__dirname, 'public/favicon.png');
-    if (fs.existsSync(favPath)) {
-      res.setHeader('Cache-Control', 'public, max-age=604800');
-      res.type('image/png').sendFile(favPath);
-      return;
-    }
-    res.status(204).end();
-  });
+app.get('/favicon.ico', (_req, res) => {
+  const favPath = resolveExistingFile(['public/favicon.png', 'dist/favicon.png']);
+  if (favPath) {
+    res.setHeader('Cache-Control', 'public, max-age=604800');
+    res.type('image/png').sendFile(favPath);
+    return;
+  }
+  res.status(204).end();
+});
 
+if (!IS_VERCEL) {
   app.use(
     '/fonts',
     express.static(path.resolve(__dirname, 'public/fonts'), {
@@ -458,93 +536,53 @@ async function startServer(): Promise<void> {
     }),
   );
   app.use(
-    '/uploads',
-    express.static(UPLOAD_DIR, {
-      maxAge: '30d',
-    }),
-  );
-  app.use(
     express.static(path.resolve(__dirname, 'public'), {
       index: false,
       maxAge: '7d',
     }),
   );
+}
 
-  // ==================== SEO & AI DISCOVERABILITY ENDPOINTS ====================
-  app.get('/robots.txt', (req, res) => {
+// ==================== SEO & AI DISCOVERABILITY ENDPOINTS ====================
+app.get('/robots.txt', (req, res) => {
+  const origin = getBaseOrigin(req);
+  const body = [
+    '# Search Engines & AI Search Crawlers',
+    'User-agent: *',
+    'Allow: /',
+    'Disallow: /api/',
+    '',
+    'User-agent: Googlebot',
+    'Allow: /',
+    '',
+    'User-agent: OAI-SearchBot',
+    'Allow: /',
+    '',
+    'User-agent: ChatGPT-User',
+    'Allow: /',
+    '',
+    'User-agent: PerplexityBot',
+    'Allow: /',
+    '',
+    'User-agent: ClaudeBot',
+    'Allow: /',
+    '',
+    `Sitemap: ${origin}/sitemap.xml`,
+    `# LLMs context: ${origin}/llms.txt`,
+  ].join('\n');
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  res.status(200).send(body);
+});
+
+app.get('/llms.txt', async (req, res, next) => {
+  try {
     const origin = getBaseOrigin(req);
-    const body = [
-      '# Search Engines & AI Search Crawlers',
-      'User-agent: *',
-      'Allow: /',
-      'Disallow: /api/',
-      '',
-      'User-agent: Googlebot',
-      'Allow: /',
-      '',
-      'User-agent: OAI-SearchBot',
-      'Allow: /',
-      '',
-      'User-agent: ChatGPT-User',
-      'Allow: /',
-      '',
-      'User-agent: PerplexityBot',
-      'Allow: /',
-      '',
-      'User-agent: ClaudeBot',
-      'Allow: /',
-      '',
-      `Sitemap: ${origin}/sitemap.xml`,
-      `# LLMs context: ${origin}/llms.txt`,
-    ].join('\n');
-    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-    res.setHeader('Cache-Control', 'public, max-age=3600');
-    res.status(200).send(body);
-  });
-
-  function blocksToPlainMarkdown(blocks: ReturnType<typeof normalizeBlocks>): string {
-    return blocks
-      .map((block) => {
-        switch (block.type) {
-          case 'h2':
-            return `## ${block.text}`;
-          case 'h3':
-            return `### ${block.text}`;
-          case 'paragraph':
-            return block.text;
-          case 'quote':
-            return `> ${block.text}${block.author ? ` — ${block.author}` : ''}`;
-          case 'list':
-            return block.items
-              .map((item, i) => (block.ordered ? `${i + 1}. ${item}` : `- ${item}`))
-              .join('\n');
-          case 'code':
-            return `\`\`\`${block.language || ''}\n${block.code}\n\`\`\``;
-          case 'card':
-            return `**${block.title}**: ${block.body}`;
-          case 'embed':
-            return `[${block.title}](${block.url})${block.description ? ` — ${block.description}` : ''}`;
-          case 'button':
-            return `[${block.label}](${block.url})`;
-          case 'image':
-            return block.caption || block.alt ? `Image: ${block.caption || block.alt}` : '';
-          case 'video':
-            return block.caption ? `Video: ${block.caption}` : '';
-          case 'audio':
-            return block.title ? `Audio: ${block.title}` : '';
-          default:
-            return '';
-        }
-      })
-      .filter(Boolean)
-      .join('\n\n');
-  }
-
-  app.get('/llms.txt', (req, res) => {
-    const origin = getBaseOrigin(req);
-    const s = getSettings();
-    const publishedPosts = listPosts(false);
-    const projects = listProjects();
+    const [s, publishedPosts, projects] = await Promise.all([
+      getSettings(),
+      listPosts(false),
+      listProjects(),
+    ]);
     const socials = parseSocialLinks(s.socialLinksJson).filter((l) => l.enabled !== false);
 
     const lines = [
@@ -582,13 +620,19 @@ async function startServer(): Promise<void> {
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache');
     res.status(200).send(lines.join('\n') + '\n');
-  });
+  } catch (err) {
+    next(err);
+  }
+});
 
-  app.get('/llms-full.txt', (req, res) => {
+app.get('/llms-full.txt', async (req, res, next) => {
+  try {
     const origin = getBaseOrigin(req);
-    const s = getSettings();
-    const publishedPosts = listPosts(false);
-    const projects = listProjects();
+    const [s, publishedPosts, projects] = await Promise.all([
+      getSettings(),
+      listPosts(false),
+      listProjects(),
+    ]);
 
     const sections: string[] = [
       `# ${s.brandName || 'Mohammad Bagher'} — Complete Site Content`,
@@ -630,11 +674,15 @@ async function startServer(): Promise<void> {
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache');
     res.status(200).send(sections.join('\n\n') + '\n');
-  });
+  } catch (err) {
+    next(err);
+  }
+});
 
-  app.get('/sitemap.xml', (req, res) => {
+app.get('/sitemap.xml', async (req, res, next) => {
+  try {
     const origin = getBaseOrigin(req);
-    const publishedPosts = listPosts(false);
+    const publishedPosts = await listPosts(false);
     const latestLastMod = publishedPosts[0]?.updatedAt || publishedPosts[0]?.createdAt;
     const staticRoutes: Array<{
       loc: string;
@@ -668,55 +716,83 @@ async function startServer(): Promise<void> {
     res.setHeader('Content-Type', 'application/xml; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache');
     res.status(200).send(xml);
-  });
+  } catch (err) {
+    next(err);
+  }
+});
 
-  // ==================== HEALTH & CACHE DISCIPLINE (CLOUDFLARE-READY) ====================
-  app.get('/api/health', (_req, res) => {
+// ==================== HEALTH & CACHE DISCIPLINE ====================
+app.get('/api/health', async (_req, res) => {
+  try {
+    await ensureDbInitialized();
     res.setHeader('Cache-Control', 'no-store');
     res.json({ ok: true, status: 'healthy', timestamp: new Date().toISOString() });
-  });
+  } catch (err) {
+    res.status(503).json({
+      ok: false,
+      status: 'degraded',
+      error: err instanceof Error ? err.message : 'Database connection error',
+    });
+  }
+});
 
-  app.use('/api/public', (_req, res, next) => {
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-    next();
-  });
+app.use('/api/public', (_req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  next();
+});
 
-  app.use('/api/admin', (_req, res, next) => {
-    res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-    next();
-  });
+app.use('/api/admin', (_req, res, next) => {
+  res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  next();
+});
 
-  // ==================== PUBLIC API ====================
-  app.get('/api/public/site', (_req, res) => {
-    const siteSettings = getSettings();
-    const siteCategories = listCategories();
-    const sitePosts = listPosts(false);
-    const siteProjects = listProjects();
+// ==================== PUBLIC API ====================
+app.get('/api/public/site', async (_req, res, next) => {
+  try {
+    const [siteSettings, siteCategories, sitePosts, siteProjects] = await Promise.all([
+      getSettings(),
+      listCategories(),
+      listPosts(false),
+      listProjects(),
+    ]);
     res.json({
       settings: siteSettings,
       categories: siteCategories,
       posts: sitePosts,
       projects: siteProjects,
     });
-  });
+  } catch (err) {
+    next(err);
+  }
+});
 
-  app.get('/api/public/posts', (_req, res) => {
-    res.json({ posts: listPosts(false), categories: listCategories() });
-  });
+app.get('/api/public/posts', async (_req, res, next) => {
+  try {
+    const [sitePosts, siteCategories] = await Promise.all([listPosts(false), listCategories()]);
+    res.json({ posts: sitePosts, categories: siteCategories });
+  } catch (err) {
+    next(err);
+  }
+});
 
-  app.get('/api/public/posts/:slug', (req, res) => {
-    const post = getPostBySlug(req.params.slug, false);
+app.get('/api/public/posts/:slug', async (req, res, next) => {
+  try {
+    const post = await getPostBySlug(req.params.slug, false);
     if (!post) {
       res.status(404).json({ error: 'نوشته مورد نظر پیدا نشد.' });
       return;
     }
     res.json({ post });
-  });
+  } catch (err) {
+    next(err);
+  }
+});
 
-  app.get('/api/save-contact', async (req, res) => {
-    const s = getSettings();
+app.get('/api/save-contact', async (req, res, next) => {
+  try {
+    const s = await getSettings();
     if (s.vcardEnabled === 'false') {
       res.status(404).json({ error: 'کارت مخاطب در حال حاضر غیرفعال است.' });
       return;
@@ -749,9 +825,7 @@ async function startServer(): Promise<void> {
       } else if (field.type === 'email') {
         extraFieldLines.push(`EMAIL;TYPE=INTERNET:${safeVal}`);
       } else if (field.type === 'url') {
-        extraFieldLines.push(
-          safeLabel ? `URL;TYPE=${safeLabel}:${safeVal}` : `URL:${safeVal}`,
-        );
+        extraFieldLines.push(safeLabel ? `URL;TYPE=${safeLabel}:${safeVal}` : `URL:${safeVal}`);
       } else if (field.type === 'address') {
         extraFieldLines.push(`ADR;TYPE=HOME;CHARSET=UTF-8:;;${safeVal};;;;`);
       } else if (field.type === 'note') {
@@ -792,9 +866,13 @@ async function startServer(): Promise<void> {
     res.setHeader('Content-Disposition', `${disposition}; filename="mohammad-bagher.vcf"`);
     res.setHeader('Cache-Control', 'no-cache');
     res.status(200).send(vcardBody);
-  });
+  } catch (err) {
+    next(err);
+  }
+});
 
-  app.post('/api/public/contact', (req, res) => {
+app.post('/api/public/contact', async (req, res, next) => {
+  try {
     const ip = extractClientIp(req.headers, req.ip || req.socket.remoteAddress || 'unknown');
     if (!checkContactRateLimit(ip)) {
       res.status(429).json({
@@ -822,7 +900,7 @@ async function startServer(): Promise<void> {
       return;
     }
 
-    const created = createMessage({
+    const created = await createMessage({
       name: name.slice(0, 120),
       contact: contact.slice(0, 160),
       subject: subject.slice(0, 180) || 'پیام از سایت',
@@ -830,24 +908,34 @@ async function startServer(): Promise<void> {
     });
 
     res.status(201).json({ ok: true, id: created.id });
-  });
+  } catch (err) {
+    next(err);
+  }
+});
 
-  // ==================== SECRET ADMIN API ====================
-  app.get('/api/admin/session', (req, res) => {
+// ==================== SECRET ADMIN API ====================
+app.get('/api/admin/session', async (req, res, next) => {
+  try {
     if (!ADMIN_ROUTE) {
       res.json({ authenticated: false, needsSetup: false });
       return;
     }
-    const needsSetup = !hasAnyAdminUser();
-    const active = verifyActiveAdminSession(req);
+    const [hasAdmin, active] = await Promise.all([
+      hasAnyAdminUser(),
+      verifyActiveAdminSession(req),
+    ]);
     if (!active) {
-      res.json({ authenticated: false, needsSetup });
+      res.json({ authenticated: false, needsSetup: !hasAdmin });
       return;
     }
     res.json({ authenticated: true, username: active.username, needsSetup: false });
-  });
+  } catch (err) {
+    next(err);
+  }
+});
 
-  app.post('/api/admin/setup', (req, res) => {
+app.post('/api/admin/setup', async (req, res, next) => {
+  try {
     if (!ADMIN_ROUTE) {
       res.status(403).json({ error: 'مسیر پنل مدیریت در تنظیمات سرور فعال نشده است.' });
       return;
@@ -856,7 +944,7 @@ async function startServer(): Promise<void> {
       res.status(403).json({ error: 'درخواست نامعتبر (بررسی امنیتی مبدا).' });
       return;
     }
-    if (hasAnyAdminUser()) {
+    if (await hasAnyAdminUser()) {
       res.status(403).json({ error: 'حساب مدیر قبلاً راه‌اندازی شده است.' });
       return;
     }
@@ -871,18 +959,23 @@ async function startServer(): Promise<void> {
       return;
     }
 
-    const created = setupFirstAdminUser({ username, password });
+    const created = await setupFirstAdminUser({ username, password });
     if (!created.ok) {
       res.status(400).json({ error: created.error });
       return;
     }
 
-    const token = createSessionToken(created.user, SESSION_SECRET);
+    const secret = await getOrCreateSessionSecret();
+    const token = createSessionToken(created.user, secret);
     setSessionCookie(req, res, token);
     res.status(201).json({ ok: true, username: created.user.username, token });
-  });
+  } catch (err) {
+    next(err);
+  }
+});
 
-  app.post('/api/admin/login', (req, res) => {
+app.post('/api/admin/login', async (req, res, next) => {
+  try {
     if (!ADMIN_ROUTE) {
       res.status(403).json({ error: 'مسیر پنل مدیریت در تنظیمات سرور فعال نشده است.' });
       return;
@@ -899,7 +992,7 @@ async function startServer(): Promise<void> {
       return;
     }
 
-    if (!hasAnyAdminUser()) {
+    if (!(await hasAnyAdminUser())) {
       res.status(400).json({ error: 'ابتدا حساب مدیر را در فرم راه‌اندازی اولیه ایجاد کن.' });
       return;
     }
@@ -913,7 +1006,7 @@ async function startServer(): Promise<void> {
       return;
     }
 
-    const user = authenticateAdminUser(username, password);
+    const user = await authenticateAdminUser(username, password);
     if (!user) {
       recordFailedLogin(ip);
       res.status(401).json({ error: 'نام کاربری یا رمز عبور اشتباه است.' });
@@ -921,32 +1014,58 @@ async function startServer(): Promise<void> {
     }
 
     clearFailedLogin(ip);
-    const token = createSessionToken(user, SESSION_SECRET);
+    const secret = await getOrCreateSessionSecret();
+    const token = createSessionToken(user, secret);
     setSessionCookie(req, res, token);
     res.json({ ok: true, username: user.username, token });
-  });
+  } catch (err) {
+    next(err);
+  }
+});
 
-  app.post('/api/admin/logout', (req, res) => {
-    clearSessionCookie(req, res);
-    res.json({ ok: true });
-  });
+app.post('/api/admin/logout', (req, res) => {
+  clearSessionCookie(req, res);
+  res.json({ ok: true });
+});
 
-  app.get('/api/admin/bootstrap', requireAdmin, (req, res) => {
+app.get('/api/admin/bootstrap', requireAdmin, async (req, res, next) => {
+  try {
     const adminUser = (req as AuthedRequest).adminUser;
+    const [
+      siteSettings,
+      siteCategories,
+      sitePosts,
+      siteProjects,
+      siteMessages,
+      siteMedia,
+      aiConfig,
+    ] = await Promise.all([
+      getSettings(),
+      listCategories(),
+      listPosts(true),
+      listProjects(),
+      listMessages(),
+      listUploadedMedia(),
+      getAiConfigPublic(),
+    ]);
     res.json({
       username: adminUser?.username || 'admin',
-      settings: getSettings(),
-      categories: listCategories(),
-      posts: listPosts(true),
-      projects: listProjects(),
-      messages: listMessages(),
-      media: listUploadedMedia(),
-      aiConfig: getAiConfigPublic(),
+      settings: siteSettings,
+      categories: siteCategories,
+      posts: sitePosts,
+      projects: siteProjects,
+      messages: siteMessages,
+      media: siteMedia,
+      aiConfig,
     });
-  });
+  } catch (err) {
+    next(err);
+  }
+});
 
-  // Security: Change Credentials & Revoke Sessions
-  app.put('/api/admin/security/credentials', requireAdmin, (req, res) => {
+// Security: Change Credentials & Revoke Sessions
+app.put('/api/admin/security/credentials', requireAdmin, async (req, res, next) => {
+  try {
     const adminUser = (req as AuthedRequest).adminUser!;
     const body = (req.body ?? {}) as Record<string, unknown>;
     const currentPassword = typeof body.currentPassword === 'string' ? body.currentPassword : '';
@@ -969,7 +1088,7 @@ async function startServer(): Promise<void> {
       }
     }
 
-    const result = changeAdminCredentials({
+    const result = await changeAdminCredentials({
       currentUsername: adminUser.username,
       currentPassword,
       newUsername: newUsername || undefined,
@@ -981,171 +1100,201 @@ async function startServer(): Promise<void> {
       return;
     }
 
-    const freshToken = createSessionToken(result.user, SESSION_SECRET);
+    const secret = await getOrCreateSessionSecret();
+    const freshToken = createSessionToken(result.user, secret);
     setSessionCookie(req, res, freshToken);
     res.json({ ok: true, username: result.user.username, token: freshToken });
-  });
+  } catch (err) {
+    next(err);
+  }
+});
 
-  app.post('/api/admin/security/revoke-all', requireAdmin, (req, res) => {
+app.post('/api/admin/security/revoke-all', requireAdmin, async (req, res, next) => {
+  try {
     const adminUser = (req as AuthedRequest).adminUser!;
-    bumpAdminTokenVersion(adminUser.username);
+    await bumpAdminTokenVersion(adminUser.username);
     clearSessionCookie(req, res);
     res.json({ ok: true });
-  });
+  } catch (err) {
+    next(err);
+  }
+});
 
-  app.put('/api/admin/settings', requireAdmin, (req, res) => {
-    const updated = updateSettings(req.body ?? {});
+app.put('/api/admin/settings', requireAdmin, async (req, res, next) => {
+  try {
+    const updated = await updateSettings(req.body ?? {});
     res.json({ settings: updated });
-  });
+  } catch (err) {
+    next(err);
+  }
+});
 
-  // Categories CRUD + Drag-and-Drop Reorder
-  app.put('/api/admin/categories/reorder', requireAdmin, (req, res) => {
+// Categories CRUD + Drag-and-Drop Reorder
+app.put('/api/admin/categories/reorder', requireAdmin, async (req, res, next) => {
+  try {
     const ids = Array.isArray((req.body as Record<string, unknown>)?.ids)
       ? ((req.body as Record<string, unknown>).ids as unknown[])
           .map((n) => Number(n))
           .filter((n) => Number.isInteger(n) && n > 0)
       : [];
-    const updated = reorderCategories(ids);
+    const updated = await reorderCategories(ids);
     res.json({ categories: updated });
-  });
+  } catch (err) {
+    next(err);
+  }
+});
 
-  app.post('/api/admin/categories', requireAdmin, (req, res) => {
+app.post('/api/admin/categories', requireAdmin, async (req, res) => {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const name = typeof body.name === 'string' ? body.name.trim() : '';
+  const description = typeof body.description === 'string' ? body.description.trim() : '';
+  if (!name) {
+    res.status(400).json({ error: 'نام دسته‌بندی نمی‌تواند خالی باشد.' });
+    return;
+  }
+  try {
+    const category = await upsertCategory({
+      name,
+      nameEn: typeof body.nameEn === 'string' ? body.nameEn.trim() : '',
+      description,
+      descriptionEn: typeof body.descriptionEn === 'string' ? body.descriptionEn.trim() : '',
+      sortOrder: typeof body.sortOrder === 'number' ? body.sortOrder : undefined,
+    });
+    res.status(201).json({ category });
+  } catch {
+    res.status(409).json({ error: 'این دسته‌بندی قبلاً ثبت شده است.' });
+  }
+});
+
+app.put('/api/admin/categories/:id', requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const name = typeof body.name === 'string' ? body.name.trim() : '';
+  const description = typeof body.description === 'string' ? body.description.trim() : '';
+  if (!Number.isInteger(id) || !name) {
+    res.status(400).json({ error: 'اطلاعات دسته‌بندی ناقص است.' });
+    return;
+  }
+  try {
+    const category = await upsertCategory({
+      id,
+      name,
+      nameEn: typeof body.nameEn === 'string' ? body.nameEn.trim() : '',
+      description,
+      descriptionEn: typeof body.descriptionEn === 'string' ? body.descriptionEn.trim() : '',
+      sortOrder: typeof body.sortOrder === 'number' ? body.sortOrder : undefined,
+    });
+    res.json({ category });
+  } catch {
+    res.status(409).json({ error: 'نام دسته‌بندی تکراری است.' });
+  }
+});
+
+app.delete('/api/admin/categories/:id', requireAdmin, async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    res.json({ ok: await deleteCategory(id) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Posts CRUD
+app.post('/api/admin/posts', requireAdmin, async (req, res) => {
+  try {
     const body = (req.body ?? {}) as Record<string, unknown>;
-    const name = typeof body.name === 'string' ? body.name.trim() : '';
-    const description = typeof body.description === 'string' ? body.description.trim() : '';
-    if (!name) {
-      res.status(400).json({ error: 'نام دسته‌بندی نمی‌تواند خالی باشد.' });
+    const title = typeof body.title === 'string' ? body.title.trim() : '';
+    const excerpt = typeof body.excerpt === 'string' ? body.excerpt.trim() : '';
+    if (!title) {
+      res.status(400).json({ error: 'عنوان نوشته نمی‌تواند خالی باشد.' });
       return;
     }
-    try {
-      const category = upsertCategory({
-        name,
-        nameEn: typeof body.nameEn === 'string' ? body.nameEn.trim() : '',
-        description,
-        descriptionEn: typeof body.descriptionEn === 'string' ? body.descriptionEn.trim() : '',
-        sortOrder: typeof body.sortOrder === 'number' ? body.sortOrder : undefined,
-      });
-      res.status(201).json({ category });
-    } catch {
-      res.status(409).json({ error: 'این دسته‌بندی قبلاً ثبت شده است.' });
-    }
-  });
+    const post = await upsertPost({
+      title,
+      titleEn: typeof body.titleEn === 'string' ? body.titleEn.trim() : '',
+      slug: typeof body.slug === 'string' ? body.slug : undefined,
+      excerpt: excerpt || title,
+      excerptEn: typeof body.excerptEn === 'string' ? body.excerptEn.trim() : '',
+      category: typeof body.category === 'string' ? body.category.trim() : 'یادگیری',
+      coverImage: typeof body.coverImage === 'string' ? body.coverImage.trim() : '',
+      blocks: normalizeBlocks(body.blocks),
+      blocksEn: Array.isArray(body.blocksEn) ? normalizeBlocks(body.blocksEn) : [],
+      published: body.published !== false,
+    });
+    res.status(201).json({ post });
+  } catch (err) {
+    console.error('POST /api/admin/posts failed:', err);
+    res.status(500).json({ error: 'خطا در ذخیره نوشته. لطفاً دوباره امتحان کن.' });
+  }
+});
 
-  app.put('/api/admin/categories/:id', requireAdmin, (req, res) => {
+app.put('/api/admin/posts/:id', requireAdmin, async (req, res) => {
+  try {
     const id = Number(req.params.id);
-    const body = (req.body ?? {}) as Record<string, unknown>;
-    const name = typeof body.name === 'string' ? body.name.trim() : '';
-    const description = typeof body.description === 'string' ? body.description.trim() : '';
-    if (!Number.isInteger(id) || !name) {
-      res.status(400).json({ error: 'اطلاعات دسته‌بندی ناقص است.' });
+    if (!Number.isInteger(id) || id <= 0) {
+      res.status(400).json({ error: 'شناسه نوشته نامعتبر است.' });
       return;
     }
-    try {
-      const category = upsertCategory({
-        id,
-        name,
-        nameEn: typeof body.nameEn === 'string' ? body.nameEn.trim() : '',
-        description,
-        descriptionEn: typeof body.descriptionEn === 'string' ? body.descriptionEn.trim() : '',
-        sortOrder: typeof body.sortOrder === 'number' ? body.sortOrder : undefined,
-      });
-      res.json({ category });
-    } catch {
-      res.status(409).json({ error: 'نام دسته‌بندی تکراری است.' });
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const title = typeof body.title === 'string' ? body.title.trim() : '';
+    if (!title) {
+      res.status(400).json({ error: 'عنوان نوشته نمی‌تواند خالی باشد.' });
+      return;
     }
-  });
+    const post = await upsertPost({
+      id,
+      title,
+      titleEn: typeof body.titleEn === 'string' ? body.titleEn.trim() : '',
+      slug: typeof body.slug === 'string' ? body.slug : undefined,
+      excerpt: typeof body.excerpt === 'string' ? body.excerpt.trim() : title,
+      excerptEn: typeof body.excerptEn === 'string' ? body.excerptEn.trim() : '',
+      category: typeof body.category === 'string' ? body.category.trim() : 'یادگیری',
+      coverImage: typeof body.coverImage === 'string' ? body.coverImage.trim() : '',
+      blocks: normalizeBlocks(body.blocks),
+      blocksEn: Array.isArray(body.blocksEn) ? normalizeBlocks(body.blocksEn) : [],
+      published: Boolean(body.published),
+    });
+    res.json({ post });
+  } catch (err) {
+    console.error('PUT /api/admin/posts/:id failed:', err);
+    res.status(500).json({ error: 'خطا در به‌روزرسانی نوشته.' });
+  }
+});
 
-  app.delete('/api/admin/categories/:id', requireAdmin, (req, res) => {
+app.delete('/api/admin/posts/:id', requireAdmin, async (req, res, next) => {
+  try {
     const id = Number(req.params.id);
-    res.json({ ok: deleteCategory(id) });
-  });
+    res.json({ ok: await deletePost(id) });
+  } catch (err) {
+    next(err);
+  }
+});
 
-  // Posts CRUD
-  app.post('/api/admin/posts', requireAdmin, (req, res) => {
-    try {
-      const body = (req.body ?? {}) as Record<string, unknown>;
-      const title = typeof body.title === 'string' ? body.title.trim() : '';
-      const excerpt = typeof body.excerpt === 'string' ? body.excerpt.trim() : '';
-      if (!title) {
-        res.status(400).json({ error: 'عنوان نوشته نمی‌تواند خالی باشد.' });
-        return;
-      }
-      const post = upsertPost({
-        title,
-        titleEn: typeof body.titleEn === 'string' ? body.titleEn.trim() : '',
-        slug: typeof body.slug === 'string' ? body.slug : undefined,
-        excerpt: excerpt || title,
-        excerptEn: typeof body.excerptEn === 'string' ? body.excerptEn.trim() : '',
-        category: typeof body.category === 'string' ? body.category.trim() : 'یادگیری',
-        coverImage: typeof body.coverImage === 'string' ? body.coverImage.trim() : '',
-        blocks: normalizeBlocks(body.blocks),
-        blocksEn: Array.isArray(body.blocksEn) ? normalizeBlocks(body.blocksEn) : [],
-        published: body.published !== false,
-      });
-      res.status(201).json({ post });
-    } catch (err) {
-      console.error('POST /api/admin/posts failed:', err);
-      res.status(500).json({ error: 'خطا در ذخیره نوشته. لطفاً دوباره امتحان کن.' });
-    }
-  });
-
-  app.put('/api/admin/posts/:id', requireAdmin, (req, res) => {
-    try {
-      const id = Number(req.params.id);
-      if (!Number.isInteger(id) || id <= 0) {
-        res.status(400).json({ error: 'شناسه نوشته نامعتبر است.' });
-        return;
-      }
-      const body = (req.body ?? {}) as Record<string, unknown>;
-      const title = typeof body.title === 'string' ? body.title.trim() : '';
-      if (!title) {
-        res.status(400).json({ error: 'عنوان نوشته نمی‌تواند خالی باشد.' });
-        return;
-      }
-      const post = upsertPost({
-        id,
-        title,
-        titleEn: typeof body.titleEn === 'string' ? body.titleEn.trim() : '',
-        slug: typeof body.slug === 'string' ? body.slug : undefined,
-        excerpt: typeof body.excerpt === 'string' ? body.excerpt.trim() : title,
-        excerptEn: typeof body.excerptEn === 'string' ? body.excerptEn.trim() : '',
-        category: typeof body.category === 'string' ? body.category.trim() : 'یادگیری',
-        coverImage: typeof body.coverImage === 'string' ? body.coverImage.trim() : '',
-        blocks: normalizeBlocks(body.blocks),
-        blocksEn: Array.isArray(body.blocksEn) ? normalizeBlocks(body.blocksEn) : [],
-        published: Boolean(body.published),
-      });
-      res.json({ post });
-    } catch (err) {
-      console.error('PUT /api/admin/posts/:id failed:', err);
-      res.status(500).json({ error: 'خطا در به‌روزرسانی نوشته.' });
-    }
-  });
-
-  app.delete('/api/admin/posts/:id', requireAdmin, (req, res) => {
-    const id = Number(req.params.id);
-    res.json({ ok: deletePost(id) });
-  });
-
-  // Projects CRUD + Drag-and-Drop Reorder
-  app.put('/api/admin/projects/reorder', requireAdmin, (req, res) => {
+// Projects CRUD + Drag-and-Drop Reorder
+app.put('/api/admin/projects/reorder', requireAdmin, async (req, res, next) => {
+  try {
     const ids = Array.isArray((req.body as Record<string, unknown>)?.ids)
       ? ((req.body as Record<string, unknown>).ids as unknown[])
           .map((n) => Number(n))
           .filter((n) => Number.isInteger(n) && n > 0)
       : [];
-    const updated = reorderProjects(ids);
+    const updated = await reorderProjects(ids);
     res.json({ projects: updated });
-  });
+  } catch (err) {
+    next(err);
+  }
+});
 
-  app.post('/api/admin/projects', requireAdmin, (req, res) => {
+app.post('/api/admin/projects', requireAdmin, async (req, res, next) => {
+  try {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const title = typeof body.title === 'string' ? body.title.trim() : '';
     if (!title) {
       res.status(400).json({ error: 'عنوان پروژه الزامی است.' });
       return;
     }
-    const project = upsertProject({
+    const existingCount = (await listProjects()).length;
+    const project = await upsertProject({
       title,
       titleEn: typeof body.titleEn === 'string' ? body.titleEn.trim() : '',
       role: typeof body.role === 'string' ? body.role.trim() : '',
@@ -1159,12 +1308,16 @@ async function startServer(): Promise<void> {
         : [],
       url: typeof body.url === 'string' ? body.url.trim() : '',
       featured: body.featured !== false,
-      sortOrder: typeof body.sortOrder === 'number' ? body.sortOrder : listProjects().length + 1,
+      sortOrder: typeof body.sortOrder === 'number' ? body.sortOrder : existingCount + 1,
     });
     res.status(201).json({ project });
-  });
+  } catch (err) {
+    next(err);
+  }
+});
 
-  app.put('/api/admin/projects/:id', requireAdmin, (req, res) => {
+app.put('/api/admin/projects/:id', requireAdmin, async (req, res, next) => {
+  try {
     const id = Number(req.params.id);
     const body = (req.body ?? {}) as Record<string, unknown>;
     const title = typeof body.title === 'string' ? body.title.trim() : '';
@@ -1172,7 +1325,7 @@ async function startServer(): Promise<void> {
       res.status(400).json({ error: 'اطلاعات پروژه ناقص است.' });
       return;
     }
-    const project = upsertProject({
+    const project = await upsertProject({
       id,
       title,
       titleEn: typeof body.titleEn === 'string' ? body.titleEn.trim() : '',
@@ -1190,65 +1343,89 @@ async function startServer(): Promise<void> {
       sortOrder: typeof body.sortOrder === 'number' ? body.sortOrder : 0,
     });
     res.json({ project });
-  });
+  } catch (err) {
+    next(err);
+  }
+});
 
-  app.delete('/api/admin/projects/:id', requireAdmin, (req, res) => {
+app.delete('/api/admin/projects/:id', requireAdmin, async (req, res, next) => {
+  try {
     const id = Number(req.params.id);
-    res.json({ ok: deleteProject(id) });
-  });
+    res.json({ ok: await deleteProject(id) });
+  } catch (err) {
+    next(err);
+  }
+});
 
-  // Messages
-  app.patch('/api/admin/messages/:id', requireAdmin, (req, res) => {
+// Messages
+app.patch('/api/admin/messages/:id', requireAdmin, async (req, res, next) => {
+  try {
     const id = Number(req.params.id);
     const read = Boolean((req.body as Record<string, unknown>)?.read);
-    res.json({ ok: markMessageRead(id, read) });
-  });
+    res.json({ ok: await markMessageRead(id, read) });
+  } catch (err) {
+    next(err);
+  }
+});
 
-  app.delete('/api/admin/messages/:id', requireAdmin, (req, res) => {
+app.delete('/api/admin/messages/:id', requireAdmin, async (req, res, next) => {
+  try {
     const id = Number(req.params.id);
-    res.json({ ok: deleteMessage(id) });
-  });
+    res.json({ ok: await deleteMessage(id) });
+  } catch (err) {
+    next(err);
+  }
+});
 
-  // Uploads
-  app.post('/api/admin/upload', requireAdmin, (req, res) => {
-    uploadMiddleware.single('file')(req, res, async (err) => {
-      if (err) {
-        const msg =
-          err instanceof Error && err.message.includes('File too large')
-            ? 'حجم فایل بیشتر از ۵۰ مگابایت است.'
-            : err instanceof Error
-              ? err.message
-              : 'خطا در آپلود فایل.';
-        res.status(400).json({ error: msg });
-        return;
-      }
-      if (!req.file) {
-        res.status(400).json({ error: 'هیچ فایلی انتخاب نشده است.' });
-        return;
-      }
-      try {
-        const result = await optimizeUploadedMedia(
-          req.file.path,
-          path.extname(req.file.originalname),
-        );
-        res.status(201).json({ file: result });
-      } catch {
-        res.status(500).json({ error: 'خطا در پردازش فایل آپلودشده.' });
-      }
-    });
+// ==================== CLOUDINARY MEDIA UPLOADS (SERVERLESS) ====================
+app.post('/api/admin/upload', requireAdmin, (req, res) => {
+  uploadMiddleware.single('file')(req, res, async (err) => {
+    if (err) {
+      const msg =
+        err instanceof Error && err.message.includes('File too large')
+          ? 'حجم فایل بیشتر از حد مجاز است.'
+          : err instanceof Error
+            ? err.message
+            : 'خطا در آپلود فایل.';
+      res.status(400).json({ error: msg });
+      return;
+    }
+    if (!req.file) {
+      res.status(400).json({ error: 'هیچ فایلی انتخاب نشده است.' });
+      return;
+    }
+    try {
+      const result = await uploadMediaToCloudinary(req.file);
+      res.status(201).json({ file: result });
+    } catch (uploadErr) {
+      const msg =
+        uploadErr instanceof Error ? uploadErr.message : 'خطا در آپلود فایل روی Cloudinary.';
+      res.status(500).json({ error: msg });
+    }
   });
+});
 
-  app.delete('/api/admin/media/:filename', requireAdmin, (req, res) => {
-    const ok = deleteUploadedMedia(req.params.filename);
+app.delete('/api/admin/media/*', requireAdmin, async (req, res, next) => {
+  try {
+    const rawKey = (req.params as Record<string, string>)['0'] || '';
+    const ok = await deleteUploadedMedia(rawKey);
     res.json({ ok });
-  });
+  } catch (err) {
+    next(err);
+  }
+});
 
-  // ==================== ADMIN-ONLY AI ASSISTANT API ====================
-  app.get('/api/admin/ai/config', requireAdmin, (_req, res) => {
-    res.json({ aiConfig: getAiConfigPublic() });
-  });
+// ==================== ADMIN-ONLY AI ASSISTANT API ====================
+app.get('/api/admin/ai/config', requireAdmin, async (_req, res, next) => {
+  try {
+    res.json({ aiConfig: await getAiConfigPublic() });
+  } catch (err) {
+    next(err);
+  }
+});
 
-  app.put('/api/admin/ai/config', requireAdmin, (req, res) => {
+app.put('/api/admin/ai/config', requireAdmin, async (req, res, next) => {
+  try {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const provider =
       body.provider === 'openai_compatible' || body.provider === 'gemini'
@@ -1267,7 +1444,7 @@ async function startServer(): Promise<void> {
       }
     }
 
-    const updated = updateAiConfig({
+    const updated = await updateAiConfig({
       provider,
       model: typeof body.model === 'string' ? body.model : undefined,
       baseUrl: validatedBaseUrl,
@@ -1275,223 +1452,151 @@ async function startServer(): Promise<void> {
       clearCustomApiKey: Boolean(body.clearCustomApiKey),
     });
     res.json({ aiConfig: updated });
-  });
+  } catch (err) {
+    next(err);
+  }
+});
 
-  app.post('/api/admin/ai/test', requireAdmin, async (req, res) => {
-    try {
-      const body = (req.body ?? {}) as Record<string, unknown>;
-      const providerOverride: 'openai_compatible' | 'gemini' | undefined =
-        body.provider === 'openai_compatible'
-          ? 'openai_compatible'
-          : body.provider === 'gemini'
-            ? 'gemini'
-            : undefined;
-      const override = {
-        provider: providerOverride,
-        model: typeof body.model === 'string' ? body.model : undefined,
-        baseUrl: typeof body.baseUrl === 'string' ? body.baseUrl : undefined,
-        apiKey: typeof body.apiKey === 'string' ? body.apiKey : undefined,
-      };
-      const result = await testAdminAiConnection(override);
-      res.json(result);
-    } catch (err) {
-      res.status(400).json({
-        error: err instanceof Error ? err.message : 'اتصال به ارائه‌دهنده هوش مصنوعی برقرار نشد.',
-      });
-    }
-  });
-
-  app.post('/api/admin/ai/assist', requireAdmin, async (req, res) => {
-    try {
-      const body = (req.body ?? {}) as Record<string, unknown>;
-      const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
-      const action =
-        body.action === 'write_full' ||
-        body.action === 'polish' ||
-        body.action === 'proofread' ||
-        body.action === 'suggest' ||
-        body.action === 'fill_meta' ||
-        body.action === 'add_summary'
-          ? body.action
-          : 'chat';
-
-      if (!prompt && action === 'chat') {
-        res.status(400).json({ error: 'لطفاً درخواستت را برای دستیار بنویس.' });
-        return;
-      }
-
-      const rawPost = (body.currentPost ?? {}) as Record<string, unknown>;
-      const result = await runAdminAiAssist({
-        prompt: prompt || 'بر اساس متن و فیلدهای فعلی اقدام کن.',
-        action,
-        history: Array.isArray(body.history)
-          ? (body.history as Array<{ role: 'user' | 'assistant'; text: string }>)
-          : [],
-        currentPost: {
-          title: typeof rawPost.title === 'string' ? rawPost.title : '',
-          slug: typeof rawPost.slug === 'string' ? rawPost.slug : '',
-          excerpt: typeof rawPost.excerpt === 'string' ? rawPost.excerpt : '',
-          category: typeof rawPost.category === 'string' ? rawPost.category : '',
-          coverImage: typeof rawPost.coverImage === 'string' ? rawPost.coverImage : '',
-          blocks: normalizeBlocks(rawPost.blocks),
-        },
-        categories: listCategories().map((c) => c.name),
-      });
-      res.json(result);
-    } catch (err) {
-      res.status(400).json({
-        error: err instanceof Error ? err.message : 'خطا در پردازش درخواست هوش مصنوعی.',
-      });
-    }
-  });
-
-  app.post('/api/admin/ai/translate', requireAdmin, async (req, res) => {
-    try {
-      const body = (req.body ?? {}) as Record<string, unknown>;
-      const kind = body.kind;
-      if (kind !== 'post' && kind !== 'category' && kind !== 'project' && kind !== 'settings') {
-        res.status(400).json({ error: 'نوع محتوای انتخابی برای ترجمه نامعتبر است.' });
-        return;
-      }
-      const payload =
-        body.payload && typeof body.payload === 'object' && !Array.isArray(body.payload)
-          ? (body.payload as Record<string, unknown>)
-          : null;
-      if (!payload) {
-        res.status(400).json({ error: 'داده‌ای برای ترجمه ارسال نشده است.' });
-        return;
-      }
-      const result = await translateAdminContentToEnglish({
-        kind: kind as TranslateTargetKind,
-        payload,
-      });
-      res.json(result);
-    } catch (err) {
-      res.status(400).json({
-        error: err instanceof Error ? err.message : 'ترجمه هوشمند با خطا مواجه شد.',
-      });
-    }
-  });
-
-  // Ensure API errors always return clean Persian JSON (never English HTML stack traces)
-  app.use(
-    '/api',
-    (
-      err: unknown,
-      _req: express.Request,
-      res: express.Response,
-      _next: express.NextFunction,
-    ) => {
-      console.error('API Error:', err);
-      const isPayload =
-        typeof err === 'object' &&
-        err !== null &&
-        'type' in err &&
-        (err as { type?: string }).type === 'entity.too.large';
-      res.status(isPayload ? 413 : 500).json({
-        error: isPayload ? 'حجم داده‌های ارسالی بیش از حد مجاز است.' : 'خطای داخلی سرور رخ داد.',
-      });
-    },
-  );
-
-  // ==================== VITE / STATIC SPA + DYNAMIC SEO ====================
-  const httpServer = http.createServer(app);
-  let vite: Awaited<ReturnType<typeof import('vite')['createServer']>> | null = null;
-  const hmrDisabled =
-    process.env.DISABLE_HMR === 'true' ||
-    Boolean(process.env.APP_URL?.includes('.run.app')) ||
-    Boolean(process.env.K_SERVICE);
-
-  if (!IS_PROD) {
-    const { createServer } = await import('vite');
-    vite = await createServer({
-      server: {
-        middlewareMode: true,
-        hmr: hmrDisabled ? false : { server: httpServer },
-        ws: hmrDisabled ? false : undefined,
-      },
-      appType: 'custom',
+app.post('/api/admin/ai/test', requireAdmin, async (req, res) => {
+  try {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const providerOverride: 'openai_compatible' | 'gemini' | undefined =
+      body.provider === 'openai_compatible'
+        ? 'openai_compatible'
+        : body.provider === 'gemini'
+          ? 'gemini'
+          : undefined;
+    const override = {
+      provider: providerOverride,
+      model: typeof body.model === 'string' ? body.model : undefined,
+      baseUrl: typeof body.baseUrl === 'string' ? body.baseUrl : undefined,
+      apiKey: typeof body.apiKey === 'string' ? body.apiKey : undefined,
+    };
+    const result = await testAdminAiConnection(override);
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : 'اتصال به ارائه‌دهنده هوش مصنوعی برقرار نشد.',
     });
-    if (hmrDisabled) {
-      // When HMR is disabled (e.g. DISABLE_HMR=true or Cloud Run / AI Studio proxy),
-      // Vite's dev CSS/React transforms still import updateStyle/createHotContext from
-      // /@vite/client. Serving a lightweight WebSocket-free shim preserves CSS injection
-      // while eliminating recurring WebSocket connection errors.
-      const NO_WS_VITE_CLIENT_SHIM = `
-const sheetsMap = new Map();
-export function updateStyle(id, content) {
-  let style = sheetsMap.get(id);
-  if (!style) {
-    style = document.createElement('style');
-    style.setAttribute('type', 'text/css');
-    style.setAttribute('data-vite-dev-id', id);
-    style.textContent = content;
-    document.head.appendChild(style);
-    sheetsMap.set(id, style);
-  } else {
-    style.textContent = content;
   }
-}
-export function removeStyle(id) {
-  const style = sheetsMap.get(id);
-  if (style) {
-    document.head.removeChild(style);
-    sheetsMap.delete(id);
-  }
-}
-export function createHotContext() {
-  const noop = () => {};
-  return {
-    data: {},
-    accept: noop,
-    acceptExports: noop,
-    dispose: noop,
-    prune: noop,
-    decline: noop,
-    invalidate: noop,
-    on: noop,
-    off: noop,
-    send: noop,
-  };
-}
-export function injectQuery(url) {
-  return url;
-}
-export class ErrorOverlay {}
-`.trim();
-      app.get('/@vite/client', (_req, res) => {
-        res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
-        res.setHeader('Cache-Control', 'no-store');
-        res.send(NO_WS_VITE_CLIENT_SHIM);
-      });
+});
+
+app.post('/api/admin/ai/assist', requireAdmin, async (req, res) => {
+  try {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
+    const action =
+      body.action === 'write_full' ||
+      body.action === 'polish' ||
+      body.action === 'proofread' ||
+      body.action === 'suggest' ||
+      body.action === 'fill_meta' ||
+      body.action === 'add_summary'
+        ? body.action
+        : 'chat';
+
+    if (!prompt && action === 'chat') {
+      res.status(400).json({ error: 'لطفاً درخواستت را برای دستیار بنویس.' });
+      return;
     }
-    app.use(vite.middlewares);
-  } else {
-    const distDir = path.resolve(__dirname, 'dist');
-    app.use(
-      '/assets',
-      express.static(path.resolve(distDir, 'assets'), {
-        maxAge: '365d',
-        immutable: true,
-      }),
-    );
-    app.use(express.static(distDir, { index: false, maxAge: '7d' }));
+
+    const rawPost = (body.currentPost ?? {}) as Record<string, unknown>;
+    const allCats = await listCategories();
+    const result = await runAdminAiAssist({
+      prompt: prompt || 'بر اساس متن و فیلدهای فعلی اقدام کن.',
+      action,
+      history: Array.isArray(body.history)
+        ? (body.history as Array<{ role: 'user' | 'assistant'; text: string }>)
+        : [],
+      currentPost: {
+        title: typeof rawPost.title === 'string' ? rawPost.title : '',
+        slug: typeof rawPost.slug === 'string' ? rawPost.slug : '',
+        excerpt: typeof rawPost.excerpt === 'string' ? rawPost.excerpt : '',
+        category: typeof rawPost.category === 'string' ? rawPost.category : '',
+        coverImage: typeof rawPost.coverImage === 'string' ? rawPost.coverImage : '',
+        blocks: normalizeBlocks(rawPost.blocks),
+      },
+      categories: allCats.map((c) => c.name),
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : 'خطا در پردازش درخواست هوش مصنوعی.',
+    });
   }
+});
 
-  const STATIC_OR_MODULE_PREFIXES = [
-    '/src/',
-    '/assets/',
-    '/@vite/',
-    '/@fs/',
-    '/@id/',
-    '/node_modules/',
-    '/uploads/',
-    '/fonts/',
-  ];
-  const STATIC_OR_MODULE_EXT_RE =
-    /\.(js|mjs|cjs|ts|tsx|jsx|css|scss|map|png|jpe?g|webp|avif|gif|svg|ico|mp4|webm|mov|mp3|wav|ogg|m4a|woff2?|ttf|eot|pdf|vcf|json|xml)$/i;
+app.post('/api/admin/ai/translate', requireAdmin, async (req, res) => {
+  try {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const kind = body.kind;
+    if (kind !== 'post' && kind !== 'category' && kind !== 'project' && kind !== 'settings') {
+      res.status(400).json({ error: 'نوع محتوای انتخابی برای ترجمه نامعتبر است.' });
+      return;
+    }
+    const payload =
+      body.payload && typeof body.payload === 'object' && !Array.isArray(body.payload)
+        ? (body.payload as Record<string, unknown>)
+        : null;
+    if (!payload) {
+      res.status(400).json({ error: 'داده‌ای برای ترجمه ارسال نشده است.' });
+      return;
+    }
+    const result = await translateAdminContentToEnglish({
+      kind: kind as TranslateTargetKind,
+      payload,
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : 'ترجمه هوشمند با خطا مواجه شد.',
+    });
+  }
+});
 
-  app.get('*', async (req, res, next) => {
+// Ensure API errors always return clean JSON
+app.use(
+  '/api',
+  (
+    err: unknown,
+    _req: express.Request,
+    res: express.Response,
+    _next: express.NextFunction,
+  ) => {
+    console.error('API Error:', err);
+    const isPayload =
+      typeof err === 'object' &&
+      err !== null &&
+      'type' in err &&
+      (err as { type?: string }).type === 'entity.too.large';
+    res.status(isPayload ? 413 : 500).json({
+      error: isPayload ? 'حجم داده‌های ارسالی بیش از حد مجاز است.' : 'خطای داخلی سرور رخ داد.',
+    });
+  },
+);
+
+// ==================== SSR HTML + DYNAMIC SEO HANDLER ====================
+const STATIC_OR_MODULE_PREFIXES = [
+  '/src/',
+  '/assets/',
+  '/@vite/',
+  '/@fs/',
+  '/@id/',
+  '/node_modules/',
+  '/uploads/',
+  '/fonts/',
+];
+const STATIC_OR_MODULE_EXT_RE =
+  /\.(js|mjs|cjs|ts|tsx|jsx|css|scss|map|png|jpe?g|webp|avif|gif|svg|ico|mp4|webm|mov|mp3|wav|ogg|m4a|woff2?|ttf|eot|pdf|vcf|json|xml)$/i;
+
+type ViteDevServer = Awaited<ReturnType<typeof import('vite')['createServer']>>;
+
+function registerSpaAndSeoRoute(
+  targetApp: express.Express,
+  vite: ViteDevServer | null,
+  hmrDisabled: boolean,
+): void {
+  targetApp.get('*', async (req, res, next) => {
     if (req.path.startsWith('/api/')) {
       res.status(404).json({ error: 'مسیر API پیدا نشد.' });
       return;
@@ -1507,8 +1612,12 @@ export class ErrorOverlay {}
 
     try {
       const templatePath = IS_PROD
-        ? path.resolve(__dirname, 'dist/index.html')
-        : path.resolve(__dirname, 'index.html');
+        ? resolveExistingFile(['dist/index.html', 'index.html'])
+        : resolveExistingFile(['index.html', 'dist/index.html']);
+      if (!templatePath) {
+        res.status(500).type('text/plain; charset=utf-8').send('HTML template not found');
+        return;
+      }
       let html = fs.readFileSync(templatePath, 'utf-8');
 
       if (!IS_PROD && vite) {
@@ -1522,7 +1631,7 @@ export class ErrorOverlay {}
 
       const origin = getBaseOrigin(req);
       const canonicalUrl = `${origin}${req.path === '/' ? '/' : req.path}`;
-      const siteSettings = getSettings();
+      const siteSettings = await getSettings();
       let pageTitle = siteSettings.siteTitle;
       let pageDescription = siteSettings.siteDescription;
       const defaultPoster = siteSettings.heroPosterDesktop?.trim() || '/poster.webp';
@@ -1530,9 +1639,10 @@ export class ErrorOverlay {}
       let ogType = 'website';
       let httpStatus = 200;
 
-      const publicCategories = isSecretAdminRoute ? [] : listCategories();
-      const publicPosts = isSecretAdminRoute ? [] : listPosts(false);
-      const publicProjects = isSecretAdminRoute ? [] : listProjects();
+      const [publicCategories, publicPosts, publicProjects] = isSecretAdminRoute
+        ? [[], [], []]
+        : await Promise.all([listCategories(), listPosts(false), listProjects()]);
+
       const sameAsLinks = parseSocialLinks(siteSettings.socialLinksJson)
         .filter((s) => s.enabled !== false && s.url.startsWith('http'))
         .map((s) => s.url);
@@ -1550,7 +1660,7 @@ export class ErrorOverlay {}
           'AI-Assisted Web & App Development',
           'AI Agents & Automation',
           'Software Troubleshooting & Optimization',
-          'Local-First Web Architecture',
+          'Serverless Web Architecture',
         ],
         sameAs: sameAsLinks,
       };
@@ -1577,7 +1687,6 @@ export class ErrorOverlay {}
         res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate');
         pageTitle = `پنل مدیریت | ${siteSettings.brandName}`;
       } else {
-        // Ensure Cloudflare never serves stale SSR HTML after creating/editing/deleting posts or site texts
         res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
 
         if (req.path === '/') {
@@ -1607,7 +1716,7 @@ export class ErrorOverlay {}
           };
         } else if (req.path.startsWith('/blog/') && req.path.length > 6) {
           const slug = req.path.slice('/blog/'.length);
-          const post = getPostBySlug(slug, false);
+          const post = await getPostBySlug(slug, false);
           if (post) {
             pageTitle = `${post.title} | ${siteSettings.brandName}`;
             pageDescription = post.excerpt;
@@ -1790,10 +1899,110 @@ export class ErrorOverlay {}
       next(err);
     }
   });
+}
+
+// ==================== SERVER BOOTSTRAP (VERCEL vs LOCAL) ====================
+if (IS_PROD) {
+  if (!IS_VERCEL) {
+    const distDir = path.resolve(__dirname, 'dist');
+    app.use(
+      '/assets',
+      express.static(path.resolve(distDir, 'assets'), {
+        maxAge: '365d',
+        immutable: true,
+      }),
+    );
+    app.use(express.static(distDir, { index: false, maxAge: '7d' }));
+  }
+  registerSpaAndSeoRoute(app, null, false);
+}
+
+async function startLocalServer(): Promise<void> {
+  await ensureDbInitialized();
+  const httpServer = http.createServer(app);
+  const hmrDisabled =
+    process.env.DISABLE_HMR === 'true' ||
+    Boolean(process.env.APP_URL?.includes('.run.app')) ||
+    Boolean(process.env.K_SERVICE);
+
+  if (!IS_PROD) {
+    const { createServer } = await import('vite');
+    const vite = await createServer({
+      server: {
+        middlewareMode: true,
+        hmr: hmrDisabled ? false : { server: httpServer },
+        ws: hmrDisabled ? false : undefined,
+      },
+      appType: 'custom',
+    });
+    if (hmrDisabled) {
+      const NO_WS_VITE_CLIENT_SHIM = `
+const sheetsMap = new Map();
+export function updateStyle(id, content) {
+  let style = sheetsMap.get(id);
+  if (!style) {
+    style = document.createElement('style');
+    style.setAttribute('type', 'text/css');
+    style.setAttribute('data-vite-dev-id', id);
+    style.textContent = content;
+    document.head.appendChild(style);
+    sheetsMap.set(id, style);
+  } else {
+    style.textContent = content;
+  }
+}
+export function removeStyle(id) {
+  const style = sheetsMap.get(id);
+  if (style) {
+    document.head.removeChild(style);
+    sheetsMap.delete(id);
+  }
+}
+export function createHotContext() {
+  const noop = () => {};
+  return {
+    data: {},
+    accept: noop,
+    acceptExports: noop,
+    dispose: noop,
+    prune: noop,
+    decline: noop,
+    invalidate: noop,
+    on: noop,
+    off: noop,
+    send: noop,
+  };
+}
+export function injectQuery(url) {
+  return url;
+}
+export class ErrorOverlay {}
+`.trim();
+      app.get('/@vite/client', (_req, res) => {
+        res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-store');
+        res.send(NO_WS_VITE_CLIENT_SHIM);
+      });
+    }
+    app.use(vite.middlewares);
+    registerSpaAndSeoRoute(app, vite, hmrDisabled);
+  }
 
   httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Server listening on http://0.0.0.0:${PORT}`);
   });
 }
 
-startServer();
+const isDirectExecution =
+  !IS_VERCEL &&
+  Boolean(process.argv[1]) &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (isDirectExecution) {
+  startLocalServer().catch((err) => {
+    console.error('Failed to start server:', err);
+    process.exit(1);
+  });
+}
+
+export default app;

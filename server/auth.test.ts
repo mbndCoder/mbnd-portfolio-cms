@@ -29,7 +29,7 @@ test('extractClientIp prefers Cloudflare header, then x-forwarded-for, then fall
 test('AI config disables automatic env fallback and rejects connection test without custom key', async () => {
   const { getAiConfigPublic } = await import('./db.ts');
   const { testAdminAiConnection } = await import('./ai.ts');
-  const pub = getAiConfigPublic();
+  const pub = await getAiConfigPublic();
   assert.equal(pub.envGeminiAvailable, false);
   assert.equal(pub.envOpenAiAvailable, false);
   assert.ok(pub.model.length > 0);

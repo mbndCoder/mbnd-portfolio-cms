@@ -529,7 +529,7 @@ async function callOpenAiCompatibleProvider(
 }
 
 export async function runAdminAiAssist(input: AiAssistInput): Promise<AiAssistResponse> {
-  const cfg = getAiConfigResolved();
+  const cfg = await getAiConfigResolved();
   const userPrompt = buildUserPrompt(input);
 
   const rawResult =
@@ -567,7 +567,7 @@ export async function testAdminAiConnection(override?: AiConnectionOverride): Pr
   model: string;
   reply: string;
 }> {
-  const cfg = mergeConfigWithOverride(getAiConfigResolved(), override);
+  const cfg = mergeConfigWithOverride(await getAiConfigResolved(), override);
   const testPrompt = 'فقط بنویس: اتصال برقرار است.';
   const testSystem = 'پاسخ بسیار کوتاه فارسی بده.';
 
@@ -598,7 +598,7 @@ export async function translateAdminContentToEnglish(input: {
   kind: TranslateTargetKind;
   payload: Record<string, unknown>;
 }): Promise<{ data: Record<string, unknown>; providerUsed: AiProviderType; modelUsed: string }> {
-  const cfg = getAiConfigResolved();
+  const cfg = await getAiConfigResolved();
   const prompt = [
     `Target type: ${input.kind}`,
     'Translate all Persian values in the JSON object below into natural, idiomatic English while preserving exact structure, IDs, URLs, and code blocks.',
