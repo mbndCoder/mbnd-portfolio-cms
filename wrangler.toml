@@ -1,0 +1,37 @@
+name = "mbnd-portfolio-cms"
+main = "server/app.ts"
+compatibility_date = "2025-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+run_worker_first = [
+  "/",
+  "/api/*",
+  "/robots.txt",
+  "/sitemap.xml",
+  "/llms.txt",
+  "/llms-full.txt",
+  "/favicon.ico"
+]
+
+[vars]
+NODE_ENV = "production"
+CLOUDINARY_FOLDER = "mbnd-uploads"
+# Set your public domain URL in Cloudflare Dashboard or uncomment below:
+# APP_URL = "https://mbnd.ir"
+
+# ==============================================================================
+# Secrets (set via `npx wrangler secret put <KEY>` or Cloudflare Dashboard):
+#   - LIBSQL_URL            (e.g. libsql://your-db-name.turso.io)
+#   - LIBSQL_AUTH_TOKEN     (Turso auth token)
+#   - ADMIN_ROUTE           (secret admin slug without leading slash)
+#   - SESSION_SECRET        (random 32+ char hex secret)
+#   - CLOUDINARY_CLOUD_NAME
+#   - CLOUDINARY_API_KEY
+#   - CLOUDINARY_API_SECRET
+# Optional initial admin credentials (if omitted, one-time setup form activates):
+#   - ADMIN_USERNAME
+#   - ADMIN_PASSWORD
+# ==============================================================================

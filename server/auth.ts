@@ -134,20 +134,26 @@ export function decryptSecret(ciphertext: string, masterSecret: string): string 
 }
 
 export function extractClientIp(
-  headers: Record<string, string | string[] | undefined>,
+  headers: Headers | Record<string, string | string[] | undefined>,
   fallbackIp = 'unknown',
 ): string {
-  const cfIp = headers['cf-connecting-ip'];
-  if (typeof cfIp === 'string' && cfIp.trim()) {
-    return cfIp.trim();
-  }
-  if (Array.isArray(cfIp) && cfIp[0]?.trim()) {
-    return cfIp[0].trim();
+  const readHeader = (name: string): string => {
+    if (headers instanceof Headers) {
+      return headers.get(name)?.trim() || '';
+    }
+    const val = headers[name];
+    if (typeof val === 'string') return val.trim();
+    if (Array.isArray(val) && typeof val[0] === 'string') return val[0].trim();
+    return '';
+  };
+
+  const cfIp = readHeader('cf-connecting-ip');
+  if (cfIp) {
+    return cfIp;
   }
 
-  const forwarded = headers['x-forwarded-for'];
-  const rawForwarded = Array.isArray(forwarded) ? forwarded[0] : forwarded;
-  if (typeof rawForwarded === 'string' && rawForwarded.trim()) {
+  const rawForwarded = readHeader('x-forwarded-for');
+  if (rawForwarded) {
     const first = rawForwarded.split(',')[0]?.trim();
     if (first) return first;
   }

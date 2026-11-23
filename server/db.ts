@@ -1,9 +1,8 @@
-import { createClient, type Client } from '@libsql/client';
-import { drizzle, type LibSQLDatabase } from 'drizzle-orm/libsql';
+import { createClient, type Client } from '@libsql/client/web';
+import { drizzle } from 'drizzle-orm/libsql/web';
 import { asc, desc, eq, or } from 'drizzle-orm';
-import crypto from 'node:crypto';
-import fs from 'node:fs';
-import path from 'node:path';
+
+type LibSQLDatabase = ReturnType<typeof drizzle>;
 import {
   categories,
   mediaAssets,
@@ -19,6 +18,7 @@ import {
   hashPasswordScrypt,
   verifyPasswordScrypt,
 } from './auth.ts';
+import { getEnvVar, setActiveRuntimeEnv, type RuntimeEnv } from './env.ts';
 import { parseBlocksJson } from '../src/lib/blocks.ts';
 import { estimateReadingMinutes, slugifyPersian } from '../src/lib/slug.ts';
 import type {
@@ -52,52 +52,97 @@ export function isPlaceholderEnv(value?: string): boolean {
   return false;
 }
 
-function createLibsqlConnection(): { client: Client; db: LibSQLDatabase } {
-  const rawUrl = process.env.LIBSQL_URL?.trim();
-  const rawToken = process.env.LIBSQL_AUTH_TOKEN?.trim();
-  const url = rawUrl && !isPlaceholderEnv(rawUrl) ? rawUrl : '';
-  const authToken = rawToken && !isPlaceholderEnv(rawToken) ? rawToken : undefined;
-
-  if (url) {
-    const client = createClient({
-      url,
-      ...(authToken ? { authToken } : {}),
-    });
-    return { client, db: drizzle(client) };
-  }
-
-  if (process.env.VERCEL === '1') {
-    throw new Error(
-      'LIBSQL_URL is required on Vercel Serverless. Set LIBSQL_URL and LIBSQL_AUTH_TOKEN in Environment Variables.',
-    );
-  }
-
-  // Local development / test fallback using libSQL's embedded SQLite file driver (no native better-sqlite3)
-  const localDbPath = path.resolve(process.cwd(), process.env.DB_PATH || './data/site.db');
-  fs.mkdirSync(path.dirname(localDbPath), { recursive: true });
-  const client = createClient({ url: `file:${localDbPath}` });
-  return { client, db: drizzle(client) };
+function generateRandomHex(byteLength: number): string {
+  const bytes = new Uint8Array(byteLength);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 let cachedClient: Client | null = null;
 let cachedDb: LibSQLDatabase | null = null;
+let cachedConnectionKey = '';
 let initPromise: Promise<void> | null = null;
 let cachedSessionSecret = '';
 
-export function getLibsqlClient(): Client {
+function resolveLibsqlCredentials(env?: RuntimeEnv): { url: string; authToken?: string } {
+  const rawUrl = getEnvVar('LIBSQL_URL', env).trim();
+  const rawToken = getEnvVar('LIBSQL_AUTH_TOKEN', env).trim();
+  const url = rawUrl && !isPlaceholderEnv(rawUrl) ? rawUrl : '';
+  const authToken = rawToken && !isPlaceholderEnv(rawToken) ? rawToken : undefined;
+  return { url, authToken };
+}
+
+function createLibsqlConnection(env?: RuntimeEnv): {
+  client: Client;
+  db: LibSQLDatabase;
+  key: string;
+} {
+  const { url, authToken } = resolveLibsqlCredentials(env);
+  if (!url) {
+    throw new Error(
+      'LIBSQL_URL is required for Edge / Cloudflare Workers execution. Configure LIBSQL_URL and LIBSQL_AUTH_TOKEN in Cloudflare environment secrets.',
+    );
+  }
+
+  const client = createClient({
+    url,
+    ...(authToken ? { authToken } : {}),
+  });
+  return {
+    client,
+    db: drizzle(client),
+    key: `${url}::${authToken ? 'auth' : 'noauth'}`,
+  };
+}
+
+/**
+ * Binds Cloudflare Workers `env` for the current request and refreshes the
+ * Turso `@libsql/client/web` connection if credentials changed.
+ */
+export function configureDb(env?: RuntimeEnv): void {
+  if (env) {
+    setActiveRuntimeEnv(env);
+  }
+  const { url, authToken } = resolveLibsqlCredentials(env);
+  if (!url) return;
+  const nextKey = `${url}::${authToken ? 'auth' : 'noauth'}`;
+  if (cachedClient && cachedConnectionKey === nextKey) return;
+
+  const conn = createLibsqlConnection(env);
+  cachedClient = conn.client;
+  cachedDb = conn.db;
+  cachedConnectionKey = conn.key;
+  initPromise = null;
+}
+
+/**
+ * Injects a custom libSQL Client (used only by local Node.js dev/test fallback
+ * when LIBSQL_URL is not configured). Never called on Cloudflare Workers.
+ */
+export function setCustomLibsqlClient(client: Client, connectionKey = 'custom-local'): void {
+  cachedClient = client;
+  cachedDb = drizzle(client);
+  cachedConnectionKey = connectionKey;
+  initPromise = null;
+  cachedSessionSecret = '';
+}
+
+export function getLibsqlClient(env?: RuntimeEnv): Client {
   if (!cachedClient) {
-    const conn = createLibsqlConnection();
+    const conn = createLibsqlConnection(env);
     cachedClient = conn.client;
     cachedDb = conn.db;
+    cachedConnectionKey = conn.key;
   }
   return cachedClient;
 }
 
-export function getDb(): LibSQLDatabase {
+export function getDb(env?: RuntimeEnv): LibSQLDatabase {
   if (!cachedDb) {
-    const conn = createLibsqlConnection();
+    const conn = createLibsqlConnection(env);
     cachedClient = conn.client;
     cachedDb = conn.db;
+    cachedConnectionKey = conn.key;
   }
   return cachedDb;
 }
@@ -199,16 +244,16 @@ async function ensureColumn(
   }
 }
 
-export async function getOrCreateSessionSecret(): Promise<string> {
+export async function getOrCreateSessionSecret(env?: RuntimeEnv): Promise<string> {
   if (cachedSessionSecret) return cachedSessionSecret;
 
-  const fromEnv = process.env.SESSION_SECRET?.trim();
+  const fromEnv = getEnvVar('SESSION_SECRET', env).trim();
   if (fromEnv && !isPlaceholderEnv(fromEnv) && fromEnv.length >= 16) {
     cachedSessionSecret = fromEnv;
     return cachedSessionSecret;
   }
 
-  const db = getDb();
+  const db = getDb(env);
   const [existing] = await db
     .select()
     .from(settings)
@@ -220,7 +265,7 @@ export async function getOrCreateSessionSecret(): Promise<string> {
     return cachedSessionSecret;
   }
 
-  const generated = crypto.randomBytes(32).toString('hex');
+  const generated = generateRandomHex(32);
   const now = new Date().toISOString();
   await db
     .insert(settings)
@@ -637,9 +682,9 @@ async function runDatabaseInit(): Promise<void> {
   await getOrCreateSessionSecret();
 
   // 5. Sync / Seed Admin User strictly from explicit non-placeholder env vars
-  const rawEnvUser = process.env.ADMIN_USERNAME?.trim();
-  const rawEnvHash = process.env.ADMIN_PASSWORD_HASH?.trim();
-  const rawEnvPassword = process.env.ADMIN_PASSWORD?.trim();
+  const rawEnvUser = getEnvVar('ADMIN_USERNAME').trim();
+  const rawEnvHash = getEnvVar('ADMIN_PASSWORD_HASH').trim();
+  const rawEnvPassword = getEnvVar('ADMIN_PASSWORD').trim();
   const envUser = rawEnvUser && !isPlaceholderEnv(rawEnvUser) ? rawEnvUser : '';
   const envHash = rawEnvHash && !isPlaceholderEnv(rawEnvHash) ? rawEnvHash : '';
   const envPassword = rawEnvPassword && !isPlaceholderEnv(rawEnvPassword) ? rawEnvPassword : '';

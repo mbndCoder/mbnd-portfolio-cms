@@ -1,5 +1,4 @@
 import { GoogleGenAI } from '@google/genai';
-import net from 'node:net';
 import { getAiConfigResolved, type ResolvedAiConfig } from './db.ts';
 import { normalizeBlocks } from '../src/lib/blocks.ts';
 import type {
@@ -90,6 +89,19 @@ const SYSTEM_INSTRUCTION = `تو دستیار نویسندگی و ویراستا
 - اگر کاربر فقط «پیشنهاد ویرایش / نقد / بررسی» خواست و نخواست فیلدها عوض شوند، patch را null بگذار و پیشنهادهای دقیق را در reply بنویس.
 - در هر درخواستی که تغییر، اصلاح، تصحیح، زیباسازی یا تولید متن بخواهد، حتماً patch را آماده و قابل اعمال برگردان.`;
 
+function detectIpVersion(host: string): 0 | 4 | 6 {
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) {
+    const octets = host.split('.').map(Number);
+    if (octets.every((n) => Number.isInteger(n) && n >= 0 && n <= 255)) {
+      return 4;
+    }
+  }
+  if (host.includes(':') && /^[0-9a-f:.]+$/i.test(host)) {
+    return 6;
+  }
+  return 0;
+}
+
 function isPrivateOrBlockedHost(hostname: string): boolean {
   const host = hostname.trim().toLowerCase().replace(/^\[|\]$/g, '');
   if (!host) return true;
@@ -106,7 +118,7 @@ function isPrivateOrBlockedHost(hostname: string): boolean {
     return true;
   }
 
-  const ipVersion = net.isIP(host);
+  const ipVersion = detectIpVersion(host);
   if (ipVersion === 4) {
     const octets = host.split('.').map(Number);
     if (octets.length !== 4) return true;
