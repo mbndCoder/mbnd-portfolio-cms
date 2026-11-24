@@ -1,6 +1,6 @@
 import { ArrowLeft, ArrowRight, Search } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import {
   formatDateByLang,
   formatReadingTime,
@@ -22,10 +22,18 @@ interface BlogListPageProps {
 export function BlogListPage({ posts, categories, settings, lang }: BlogListPageProps) {
   const t = getUiDict(lang);
   const loc = getLocalizedSettingsText(settings, lang);
+  const [searchParams] = useSearchParams();
   const [selectedCategory, setSelectedCategory] = useState('__ALL__');
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState(() => searchParams.get('q') || '');
   const showReading = settings.showReadingTime !== 'false';
   const ArrowForward = lang === 'en' ? ArrowRight : ArrowLeft;
+
+  useEffect(() => {
+    const qParam = searchParams.get('q');
+    if (qParam !== null) {
+      setQuery(qParam);
+    }
+  }, [searchParams]);
 
   useEffect(() => {
     document.title = `${loc.blogSectionTitle} | ${settings.brandName}`;

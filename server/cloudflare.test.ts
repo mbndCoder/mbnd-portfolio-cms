@@ -13,6 +13,7 @@ import {
   uploadMediaToCloudinary,
   UploadValidationError,
 } from './uploads.ts';
+import { normalizeAiPatch } from './ai.ts';
 import type { AssetsBinding, RuntimeEnv } from './env.ts';
 
 function createMockAssets(): AssetsBinding {
@@ -212,16 +213,32 @@ test('Hono Worker app.fetch handles public API, SEO, vCard, SSR HTML, and Admin 
   // 3. SEO & AI endpoints
   const robotsRes = await app.fetch(new Request('https://mbnd.ir/robots.txt'), env);
   assert.equal(robotsRes.status, 200);
-  assert.match(await robotsRes.text(), /Sitemap: https:\/\/mbnd\.ir\/sitemap\.xml/);
+  const robotsText = await robotsRes.text();
+  assert.match(robotsText, /Sitemap: https:\/\/mbnd\.ir\/sitemap\.xml/);
+  assert.match(robotsText, /User-agent: Bingbot/);
+  assert.match(robotsText, /User-agent: GPTBot/);
+  assert.match(robotsText, /User-agent: Google-Extended/);
 
   const sitemapRes = await app.fetch(new Request('https://mbnd.ir/sitemap.xml'), env);
   assert.equal(sitemapRes.status, 200);
   assert.match(sitemapRes.headers.get('content-type') || '', /application\/xml/);
   assert.match(await sitemapRes.text(), /<urlset/);
 
+  const rssRes = await app.fetch(new Request('https://mbnd.ir/rss.xml'), env);
+  assert.equal(rssRes.status, 200);
+  assert.match(rssRes.headers.get('content-type') || '', /application\/rss\+xml/);
+  const rssText = await rssRes.text();
+  assert.match(rssText, /<rss version="2\.0"/);
+  assert.match(rssText, /<item>/);
+
   const llmsRes = await app.fetch(new Request('https://mbnd.ir/llms.txt'), env);
   assert.equal(llmsRes.status, 200);
-  assert.match(await llmsRes.text(), /Mohammad Bagher/);
+  const llmsText = await llmsRes.text();
+  assert.match(llmsText, /Mohammad Bagher Nouri/);
+  assert.match(llmsText, /Mohammad Bagher Noori/);
+  assert.match(llmsText, /محمدباقر نوری/);
+  assert.match(llmsText, /mbnd\.ir/);
+  assert.match(llmsText, /طراحی سایت و ساخت اپلیکیشن با هوش مصنوعی/);
 
   // 4. vCard with static avatar fetched from ASSETS binding (no fs)
   const vcardRes = await app.fetch(new Request('https://mbnd.ir/api/save-contact?download=1'), env);
@@ -263,6 +280,33 @@ test('Hono Worker app.fetch handles public API, SEO, vCard, SSR HTML, and Admin 
   const homeHtml = await homeRes.text();
   assert.match(homeHtml, /id="__INITIAL_SITE_DATA__"/);
   assert.match(homeHtml, /application\/ld\+json/);
+  assert.match(homeHtml, /OfferCatalog/);
+  assert.match(homeHtml, /SearchAction/);
+  assert.match(homeHtml, /Mohammad Bagher Noori/);
+  assert.match(homeHtml, /hreflang="fa-IR"/);
+  assert.match(homeHtml, /name="keywords"/);
+
+  // www.mbnd.ir canonicalizes cleanly to https://mbnd.ir (both via APP_URL and via Host header)
+  const wwwAppUrlEnv = createTestEnv({ APP_URL: 'https://www.mbnd.ir' });
+  const wwwAppUrlRes = await app.fetch(new Request('https://www.mbnd.ir/'), wwwAppUrlEnv);
+  assert.equal(wwwAppUrlRes.status, 200);
+  assert.match(await wwwAppUrlRes.text(), /<link rel="canonical" href="https:\/\/mbnd\.ir\/" \/>/);
+
+  const prevAppUrl = process.env.APP_URL;
+  delete process.env.APP_URL;
+  try {
+    const wwwHostEnv = createTestEnv({ APP_URL: '' });
+    const wwwHostRes = await app.fetch(
+      new Request('https://www.mbnd.ir/blog', { headers: { Host: 'www.mbnd.ir' } }),
+      wwwHostEnv,
+    );
+    assert.equal(wwwHostRes.status, 200);
+    assert.match(await wwwHostRes.text(), /<link rel="canonical" href="https:\/\/mbnd\.ir\/blog" \/>/);
+  } finally {
+    if (prevAppUrl !== undefined) {
+      process.env.APP_URL = prevAppUrl;
+    }
+  }
 
   const adminHtmlRes = await app.fetch(new Request('https://mbnd.ir/secret-cf-panel'), env);
   assert.equal(adminHtmlRes.status, 200);
@@ -330,4 +374,34 @@ test('Hono Worker app.fetch handles public API, SEO, vCard, SSR HTML, and Admin 
     env,
   );
   assert.equal(uploadMissingRes.status, 400);
+});
+
+test('normalizeAiPatch supports surgical patch_blocks, blockUpdates, removeBlockIndices, and targetLang', () => {
+  const patch = normalizeAiPatch(
+    {
+      mode: 'patch_blocks',
+      targetLang: 'en',
+      title: 'Refined Title',
+      blockUpdates: [
+        { index: 1, block: { type: 'paragraph', text: 'Updated second paragraph.' } },
+        { index: -1, block: { type: 'paragraph', text: 'invalid index' } },
+      ],
+      removeBlockIndices: [3, 3, -2],
+    },
+    'fa',
+  );
+  assert.ok(patch);
+  assert.equal(patch.mode, 'patch_blocks');
+  assert.equal(patch.targetLang, 'en');
+  assert.equal(patch.title, 'Refined Title');
+  assert.equal(patch.blockUpdates?.length, 1);
+  assert.equal(patch.blockUpdates?.[0].index, 1);
+  assert.equal(patch.blockUpdates?.[0].block.type, 'paragraph');
+  assert.deepEqual(patch.removeBlockIndices, [3]);
+
+  const fallbackMeta = normalizeAiPatch({ excerpt: 'Just a summary' }, 'fa');
+  assert.ok(fallbackMeta);
+  assert.equal(fallbackMeta.mode, 'meta_only');
+  assert.equal(fallbackMeta.targetLang, 'fa');
+  assert.equal(fallbackMeta.excerpt, 'Just a summary');
 });

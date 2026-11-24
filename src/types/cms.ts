@@ -327,13 +327,21 @@ export interface AiConfigPublic {
   envOpenAiAvailable: boolean;
 }
 
+export interface AiBlockUpdate {
+  index: number;
+  block: ContentBlock;
+}
+
 export interface AiPostPatch {
-  mode: 'replace' | 'append' | 'meta_only';
+  mode: 'replace' | 'append' | 'meta_only' | 'patch_blocks';
+  targetLang?: SiteLanguage;
   title?: string;
   slug?: string;
   excerpt?: string;
   category?: string;
   blocks?: ContentBlock[];
+  blockUpdates?: AiBlockUpdate[];
+  removeBlockIndices?: number[];
 }
 
 export interface AiAssistResponse {

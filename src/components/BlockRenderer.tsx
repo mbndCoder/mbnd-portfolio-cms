@@ -134,7 +134,17 @@ function CodeBlockView({
   );
 }
 
-function ImageBlockView({ url, alt, caption }: { url: string; alt?: string; caption?: string }) {
+function ImageBlockView({
+  url,
+  alt,
+  caption,
+  lang,
+}: {
+  url: string;
+  alt?: string;
+  caption?: string;
+  lang: SiteLanguage;
+}) {
   const [failed, setFailed] = useState(false);
 
   return (
@@ -142,7 +152,9 @@ function ImageBlockView({ url, alt, caption }: { url: string; alt?: string; capt
       {!url || failed ? (
         <div className="flex h-52 flex-col items-center justify-center gap-2 rounded-2xl border border-[var(--hair)] bg-[var(--ground)] text-[var(--ink-faint)]">
           <ImageOff className="h-6 w-6" />
-          <span className="text-xs">{alt || caption || 'تصویر در دسترس نیست'}</span>
+          <span className="text-xs">
+            {alt || caption || (lang === 'en' ? 'Image unavailable' : 'تصویر در دسترس نیست')}
+          </span>
         </div>
       ) : (
         <img
@@ -163,7 +175,15 @@ function ImageBlockView({ url, alt, caption }: { url: string; alt?: string; capt
   );
 }
 
-function VideoBlockView({ url, caption }: { url: string; caption?: string }) {
+function VideoBlockView({
+  url,
+  caption,
+  lang,
+}: {
+  url: string;
+  caption?: string;
+  lang: SiteLanguage;
+}) {
   const [failed, setFailed] = useState(false);
   const parsed = parseVideoEmbed(url);
 
@@ -195,7 +215,15 @@ function VideoBlockView({ url, caption }: { url: string; caption?: string }) {
       ) : (
         <div className="flex h-44 flex-col items-center justify-center gap-2 rounded-2xl border border-[var(--hair)] bg-[var(--ground)] text-xs text-[var(--ink-faint)]">
           <VideoOff className="h-5 w-5" />
-          <span>{url ? 'پخش این ویدیو با خطا مواجه شد' : 'آدرس ویدیو وارد نشده است'}</span>
+          <span>
+            {url
+              ? lang === 'en'
+                ? 'Failed to play this video'
+                : 'پخش این ویدیو با خطا مواجه شد'
+              : lang === 'en'
+                ? 'No video URL provided'
+                : 'آدرس ویدیو وارد نشده است'}
+          </span>
         </div>
       )}
       {caption && (
@@ -391,11 +419,19 @@ export function BlockRenderer({
                 url={block.url}
                 alt={block.alt}
                 caption={block.caption}
+                lang={lang}
               />
             );
 
           case 'video':
-            return <VideoBlockView key={block.id} url={block.url} caption={block.caption} />;
+            return (
+              <VideoBlockView
+                key={block.id}
+                url={block.url}
+                caption={block.caption}
+                lang={lang}
+              />
+            );
 
           case 'audio':
             return (

@@ -2,9 +2,9 @@ import {
   ArrowDown,
   ArrowUp,
   Bold,
-  Check,
+  Code,
   Code2,
-  CopyPlus,
+  CornerDownRight,
   ExternalLink,
   Eye,
   GripVertical,
@@ -14,214 +14,273 @@ import {
   Highlighter,
   Image as ImageIcon,
   Italic,
-  LayoutPanelTop,
   Link2,
   List,
   MousePointerClick,
   PenLine,
   Quote,
+  SquareCode,
   Trash2,
   Type,
   Upload,
   Video,
   X,
 } from 'lucide-react';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import {
   createEmptyBlock,
-  moveBlock,
   parseVideoEmbed,
   reorderArray,
   sanitizeMediaUrl,
 } from '../../lib/blocks.ts';
+import {
+  detectActiveFormats,
+  exitInlineFormat,
+  insertInlineLink,
+  toggleInlineFormat,
+  type ActiveInlineFormats,
+  type InlineFormatKind,
+} from '../../lib/inlineFormat.ts';
 import type { BlockType, ContentBlock, SiteLanguage } from '../../types/cms.ts';
 import { BlockRenderer } from '../BlockRenderer.tsx';
 
 interface PostBlockBuilderProps {
   blocks: ContentBlock[];
-  onChange: (blocks: ContentBlock[]) => void;
+  onChange: (next: ContentBlock[]) => void;
   onUploadFile: (file: File) => Promise<string | null>;
   adminLang?: SiteLanguage;
   contentLang?: SiteLanguage;
 }
 
-const BLOCK_PALETTE_FA: Array<{ type: BlockType; label: string; icon: typeof Type }> = [
-  { type: 'paragraph', label: 'پاراگراف', icon: Type },
-  { type: 'h2', label: 'تیتر اصلی', icon: Heading2 },
-  { type: 'h3', label: 'تیتر فرعی', icon: Heading3 },
-  { type: 'card', label: 'کارت نکته', icon: LayoutPanelTop },
-  { type: 'button', label: 'دکمه لینک', icon: MousePointerClick },
-  { type: 'embed', label: 'لینک خارجی', icon: ExternalLink },
-  { type: 'quote', label: 'نقل‌قول', icon: Quote },
-  { type: 'list', label: 'فهرست', icon: List },
-  { type: 'code', label: 'کد', icon: Code2 },
-  { type: 'image', label: 'تصویر', icon: ImageIcon },
-  { type: 'video', label: 'ویدیو', icon: Video },
-  { type: 'audio', label: 'صوت', icon: Headphones },
-];
-
-const BLOCK_PALETTE_EN: Array<{ type: BlockType; label: string; icon: typeof Type }> = [
-  { type: 'paragraph', label: 'Paragraph', icon: Type },
-  { type: 'h2', label: 'Heading H2', icon: Heading2 },
-  { type: 'h3', label: 'Heading H3', icon: Heading3 },
-  { type: 'card', label: 'Callout Card', icon: LayoutPanelTop },
-  { type: 'button', label: 'Link Button', icon: MousePointerClick },
-  { type: 'embed', label: 'Link Card', icon: ExternalLink },
-  { type: 'quote', label: 'Quote', icon: Quote },
-  { type: 'list', label: 'List', icon: List },
-  { type: 'code', label: 'Code', icon: Code2 },
-  { type: 'image', label: 'Image', icon: ImageIcon },
-  { type: 'video', label: 'Video', icon: Video },
-  { type: 'audio', label: 'Audio', icon: Headphones },
-];
-
-const BLOCK_LABELS_FA: Record<BlockType, string> = {
-  paragraph: 'پاراگراف',
-  h2: 'تیتر H2',
-  h3: 'تیتر H3',
-  card: 'کارت نکته',
-  button: 'دکمه لینک',
-  embed: 'کارت لینک خارجی',
-  quote: 'نقل‌قول',
-  list: 'فهرست',
-  code: 'کد',
-  image: 'تصویر',
-  video: 'ویدیو',
-  audio: 'صوت',
-};
-
-const BLOCK_LABELS_EN: Record<BlockType, string> = {
-  paragraph: 'Paragraph',
-  h2: 'Heading H2',
-  h3: 'Heading H3',
-  card: 'Callout Card',
-  button: 'Link Button',
-  embed: 'External Link Card',
-  quote: 'Quote',
-  list: 'List',
-  code: 'Code Block',
-  image: 'Image',
-  video: 'Video',
-  audio: 'Audio',
-};
-
-interface InlineFormatBarProps {
-  isEn: boolean;
-  onWrap: (prefix: string, suffix: string, fallback: string) => void;
-  onInsertLink: (label: string, url: string) => void;
-  getSelectedText: () => string;
+function getBlockPalette(isUiEn: boolean): Array<{
+  type: BlockType;
+  label: string;
+  icon: typeof Type;
+}> {
+  return [
+    { type: 'paragraph', label: isUiEn ? 'Paragraph' : 'پاراگراف', icon: Type },
+    { type: 'h2', label: isUiEn ? 'Heading H2' : 'تیتر اصلی', icon: Heading2 },
+    { type: 'h3', label: isUiEn ? 'Heading H3' : 'زیرتیتر', icon: Heading3 },
+    { type: 'card', label: isUiEn ? 'Info Card' : 'کارت توضیح', icon: SquareCode },
+    { type: 'button', label: isUiEn ? 'CTA Button' : 'دکمه لینک', icon: MousePointerClick },
+    { type: 'embed', label: isUiEn ? 'Link Card' : 'کارت لینک', icon: ExternalLink },
+    { type: 'quote', label: isUiEn ? 'Quote' : 'نقل‌قول', icon: Quote },
+    { type: 'list', label: isUiEn ? 'List' : 'فهرست', icon: List },
+    { type: 'code', label: isUiEn ? 'Code' : 'کد', icon: Code2 },
+    { type: 'image', label: isUiEn ? 'Image' : 'تصویر', icon: ImageIcon },
+    { type: 'video', label: isUiEn ? 'Video' : 'ویدیو', icon: Video },
+    { type: 'audio', label: isUiEn ? 'Audio' : 'صوت', icon: Headphones },
+  ];
 }
 
-function InlineFormatBar({ isEn, onWrap, onInsertLink, getSelectedText }: InlineFormatBarProps) {
+function getBlockLabel(type: BlockType, isUiEn: boolean): string {
+  return getBlockPalette(isUiEn).find((p) => p.type === type)?.label || type;
+}
+
+const EMPTY_ACTIVE_FORMATS: ActiveInlineFormats = {
+  bold: false,
+  italic: false,
+  highlight: false,
+  code: false,
+  any: false,
+};
+
+interface InlineFormatToolbarProps {
+  onToggleFormat: (kind: InlineFormatKind) => void;
+  onExitFormat: () => void;
+  onInsertLink: (label: string, url: string) => void;
+  getSelectedText: () => string;
+  activeFormats: ActiveInlineFormats;
+  isUiEn: boolean;
+  isContentEn: boolean;
+}
+
+function InlineFormatToolbar({
+  onToggleFormat,
+  onExitFormat,
+  onInsertLink,
+  getSelectedText,
+  activeFormats,
+  isUiEn,
+  isContentEn,
+}: InlineFormatToolbarProps) {
   const [linkOpen, setLinkOpen] = useState(false);
   const [linkLabel, setLinkLabel] = useState('');
-  const [linkUrl, setLinkUrl] = useState('');
-  const [linkError, setLinkError] = useState('');
-
-  const keepSelection = (e: React.MouseEvent) => {
-    e.preventDefault();
-  };
+  const [linkUrl, setLinkUrl] = useState('https://');
+  const [linkErr, setLinkErr] = useState('');
 
   const openLinkPopover = () => {
-    const sel = getSelectedText();
-    setLinkLabel(sel);
-    setLinkUrl('');
-    setLinkError('');
-    setLinkOpen((prev) => !prev);
+    const selected = getSelectedText().trim();
+    setLinkLabel(selected);
+    setLinkUrl('https://');
+    setLinkErr('');
+    setLinkOpen(true);
   };
 
-  const confirmLink = () => {
-    const cleanUrl = sanitizeMediaUrl(linkUrl);
-    if (!cleanUrl) {
-      setLinkError(
-        isEn
-          ? 'Invalid link URL (e.g. https://example.com or /projects).'
+  const handleConfirmLink = () => {
+    const cleanedUrl = sanitizeMediaUrl(linkUrl);
+    if (
+      !cleanedUrl ||
+      cleanedUrl === 'https://' ||
+      (!cleanedUrl.startsWith('http://') &&
+        !cleanedUrl.startsWith('https://') &&
+        !cleanedUrl.startsWith('/') &&
+        !cleanedUrl.startsWith('mailto:'))
+    ) {
+      setLinkErr(
+        isUiEn
+          ? 'Please enter a valid URL (e.g. https://example.com or /projects).'
           : 'نشانی لینک معتبر نیست (مثلاً https://example.com یا /projects).',
       );
       return;
     }
-    const cleanLabel = linkLabel.trim() || cleanUrl;
-    onInsertLink(cleanLabel, cleanUrl);
+    const finalLabel = linkLabel.trim() || cleanedUrl.replace(/^https?:\/\//, '');
+    onInsertLink(finalLabel, cleanedUrl);
     setLinkOpen(false);
-    setLinkLabel('');
-    setLinkUrl('');
-    setLinkError('');
+    setLinkErr('');
   };
 
+  const btnCls = (active: boolean) =>
+    `inline-flex cursor-pointer items-center gap-1 rounded-lg border px-2 py-1 text-[11px] transition-colors ${
+      active
+        ? 'border-[var(--flame)] bg-[var(--flame)] font-bold text-[var(--flame-ink)]'
+        : 'border-transparent text-[var(--ink-muted)] hover:border-[var(--hair-strong)] hover:bg-[var(--surface)] hover:text-[var(--ink)]'
+    }`;
+
   return (
-    <div className="mb-2 space-y-1.5">
-      <div className="flex flex-wrap items-center gap-1 rounded-xl border border-[var(--hair)] bg-[var(--ground-deep)] p-1">
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-1 rounded-xl border border-[var(--hair)] bg-[var(--ground-deep)] px-2 py-1.5">
+        <span className="px-1.5 text-[10px] text-[var(--ink-faint)]">
+          {isUiEn ? 'Style:' : 'قالب متن:'}
+        </span>
         <button
           type="button"
-          onMouseDown={keepSelection}
-          onClick={() => onWrap('**', '**', isEn ? 'bold text' : 'متن بولد')}
-          title={isEn ? 'Bold' : 'بولد'}
-          aria-label={isEn ? 'Bold text' : 'بولد کردن متن'}
-          className="inline-flex h-7 cursor-pointer items-center gap-1 rounded-lg px-2 text-[11px] text-[var(--ink-soft)] hover:bg-[var(--surface)] hover:text-[var(--ink)]"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => onToggleFormat('bold')}
+          title={
+            activeFormats.bold
+              ? isUiEn
+                ? 'Exit / Remove Bold (Ctrl+B)'
+                : 'خروج یا حذف بولد (Ctrl+B)'
+              : isUiEn
+                ? 'Bold (Ctrl+B)'
+                : 'بولد (Ctrl+B)'
+          }
+          aria-pressed={activeFormats.bold}
+          className={btnCls(activeFormats.bold)}
         >
           <Bold className="h-3.5 w-3.5" />
-          <span>{isEn ? 'Bold' : 'بولد'}</span>
+          <span>{isUiEn ? 'Bold' : 'بولد'}</span>
         </button>
         <button
           type="button"
-          onMouseDown={keepSelection}
-          onClick={() => onWrap('*', '*', isEn ? 'italic text' : 'متن کج')}
-          title={isEn ? 'Italic' : 'ایتالیک'}
-          aria-label={isEn ? 'Italic text' : 'کج کردن متن'}
-          className="inline-flex h-7 cursor-pointer items-center gap-1 rounded-lg px-2 text-[11px] text-[var(--ink-soft)] hover:bg-[var(--surface)] hover:text-[var(--ink)]"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => onToggleFormat('italic')}
+          title={
+            activeFormats.italic
+              ? isUiEn
+                ? 'Exit / Remove Italic (Ctrl+I)'
+                : 'خروج یا حذف کج (Ctrl+I)'
+              : isUiEn
+                ? 'Italic (Ctrl+I)'
+                : 'کج (Ctrl+I)'
+          }
+          aria-pressed={activeFormats.italic}
+          className={btnCls(activeFormats.italic)}
         >
           <Italic className="h-3.5 w-3.5" />
-          <span>{isEn ? 'Italic' : 'کج'}</span>
+          <span>{isUiEn ? 'Italic' : 'کج'}</span>
         </button>
         <button
           type="button"
-          onMouseDown={keepSelection}
-          onClick={() => onWrap('==', '==', isEn ? 'highlighted text' : 'متن مهم')}
-          title={isEn ? 'Highlight' : 'هایلایت'}
-          aria-label={isEn ? 'Highlight text' : 'هایلایت کردن متن'}
-          className="inline-flex h-7 cursor-pointer items-center gap-1 rounded-lg px-2 text-[11px] text-[var(--ink-soft)] hover:bg-[var(--surface)] hover:text-[var(--ink)]"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => onToggleFormat('highlight')}
+          title={
+            activeFormats.highlight
+              ? isUiEn
+                ? 'Exit / Remove Highlight (Ctrl+Shift+H)'
+                : 'خروج یا حذف هایلایت (Ctrl+Shift+H)'
+              : isUiEn
+                ? 'Highlight (Ctrl+Shift+H)'
+                : 'هایلایت (Ctrl+Shift+H)'
+          }
+          aria-pressed={activeFormats.highlight}
+          className={btnCls(activeFormats.highlight)}
         >
-          <Highlighter className="h-3.5 w-3.5 text-[var(--flame)]" />
-          <span>{isEn ? 'Highlight' : 'هایلایت'}</span>
+          <Highlighter className="h-3.5 w-3.5" />
+          <span>{isUiEn ? 'Highlight' : 'هایلایت'}</span>
         </button>
         <button
           type="button"
-          onMouseDown={keepSelection}
-          onClick={() => onWrap('`', '`', 'code')}
-          title={isEn ? 'Inline code' : 'کد درون‌خطی'}
-          aria-label={isEn ? 'Inline code' : 'افزودن کد درون‌خطی'}
-          className="inline-flex h-7 cursor-pointer items-center gap-1 rounded-lg px-2 text-[11px] text-[var(--ink-soft)] hover:bg-[var(--surface)] hover:text-[var(--ink)]"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => onToggleFormat('code')}
+          title={
+            activeFormats.code
+              ? isUiEn
+                ? 'Exit / Remove Inline Code (Ctrl+E)'
+                : 'خروج یا حذف کد (Ctrl+E)'
+              : isUiEn
+                ? 'Inline Code (Ctrl+E)'
+                : 'کد درون‌خطی (Ctrl+E)'
+          }
+          aria-pressed={activeFormats.code}
+          className={btnCls(activeFormats.code)}
         >
-          <Code2 className="h-3.5 w-3.5" />
-          <span>{isEn ? 'Code' : 'کد'}</span>
+          <Code className="h-3.5 w-3.5" />
+          <span>{isUiEn ? 'Code' : 'کد'}</span>
         </button>
         <button
           type="button"
-          onMouseDown={keepSelection}
+          onMouseDown={(e) => e.preventDefault()}
           onClick={openLinkPopover}
-          title={isEn ? 'Insert link' : 'افزودن لینک'}
-          aria-label={isEn ? 'Insert link' : 'افزودن لینک درون متن'}
-          className={`inline-flex h-7 cursor-pointer items-center gap-1 rounded-lg px-2 text-[11px] transition-colors ${
-            linkOpen
-              ? 'bg-[var(--flame-tint)] text-[var(--flame)]'
-              : 'text-[var(--ink-soft)] hover:bg-[var(--surface)] hover:text-[var(--ink)]'
-          }`}
+          title={isUiEn ? 'Insert inline link' : 'افزودن لینک روی متن'}
+          className={btnCls(linkOpen)}
         >
-          <Link2 className="h-3.5 w-3.5 text-[var(--flame)]" />
-          <span>{isEn ? 'Link' : 'لینک'}</span>
+          <Link2 className="h-3.5 w-3.5" />
+          <span>{isUiEn ? 'Link' : 'لینک'}</span>
         </button>
+
+        {activeFormats.any && (
+          <button
+            type="button"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={onExitFormat}
+            title={
+              isUiEn
+                ? 'Jump cursor outside formatting (Esc)'
+                : 'خروج مکان‌نما از حالت استایل و ادامه متن عادی (Esc)'
+            }
+            className="ms-auto inline-flex cursor-pointer items-center gap-1 rounded-lg border border-[var(--flame-border)] bg-[var(--flame-tint)] px-2 py-1 text-[11px] font-medium text-[var(--flame)] hover:opacity-90"
+          >
+            <CornerDownRight className="h-3 w-3" />
+            <span>{isUiEn ? 'Exit style (Esc)' : 'خروج از استایل (Esc)'}</span>
+          </button>
+        )}
       </div>
 
       {linkOpen && (
-        <div className="rounded-xl border border-[var(--flame-border)] bg-[var(--ground-deep)] p-2.5">
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-12">
+        <div className="rounded-xl border border-[var(--flame-border)] bg-[var(--ground-deep)] p-3">
+          <div className="mb-2 flex items-center justify-between">
+            <span className="text-[11px] font-bold text-[var(--flame)]">
+              {isUiEn ? 'Insert Inline Link' : 'افزودن لینک درون‌متنی'}
+            </span>
+            <button
+              type="button"
+              onClick={() => setLinkOpen(false)}
+              aria-label={isUiEn ? 'Close' : 'بستن'}
+              className="cursor-pointer rounded p-0.5 text-[var(--ink-faint)] hover:text-[var(--ink)]"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
             <input
               type="text"
+              dir={isContentEn ? 'ltr' : 'rtl'}
               value={linkLabel}
               onChange={(e) => setLinkLabel(e.target.value)}
-              placeholder={isEn ? 'Link display text' : 'متن نمایشی لینک'}
-              aria-label={isEn ? 'Link display text' : 'متن نمایشی لینک'}
-              className="rounded-lg border border-[var(--hair-strong)] bg-[var(--ground)] px-2.5 py-1.5 text-xs text-[var(--ink)] placeholder:text-[var(--ink-faint)] focus:border-[var(--flame)] focus:outline-none sm:col-span-4"
+              placeholder={isUiEn ? 'Link display text' : 'متن نمایشی لینک'}
+              className="rounded-lg border border-[var(--hair-strong)] bg-[var(--ground)] px-2.5 py-1.5 text-xs text-[var(--ink)] placeholder:text-[var(--ink-faint)] focus:border-[var(--flame)] focus:outline-none"
             />
             <input
               type="text"
@@ -229,38 +288,35 @@ function InlineFormatBar({ isEn, onWrap, onInsertLink, getSelectedText }: Inline
               value={linkUrl}
               onChange={(e) => {
                 setLinkUrl(e.target.value);
-                if (linkError) setLinkError('');
+                if (linkErr) setLinkErr('');
               }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
                   e.preventDefault();
-                  confirmLink();
+                  handleConfirmLink();
                 }
               }}
-              placeholder={isEn ? 'https://example.com or /projects' : 'https://example.com یا /projects'}
-              aria-label={isEn ? 'Link URL' : 'نشانی لینک'}
-              className="rounded-lg border border-[var(--hair-strong)] bg-[var(--ground)] px-2.5 py-1.5 text-xs text-[var(--ink)] placeholder:text-[var(--ink-faint)] focus:border-[var(--flame)] focus:outline-none sm:col-span-5"
+              placeholder="https://example.com or /projects"
+              className="rounded-lg border border-[var(--hair-strong)] bg-[var(--ground)] px-2.5 py-1.5 font-mono text-xs text-[var(--ink)] placeholder:text-[var(--ink-faint)] focus:border-[var(--flame)] focus:outline-none"
             />
-            <div className="flex items-center gap-1.5 sm:col-span-3">
-              <button
-                type="button"
-                onClick={confirmLink}
-                className="inline-flex flex-1 cursor-pointer items-center justify-center gap-1 rounded-lg bg-[var(--flame)] px-2.5 py-1.5 text-xs font-bold text-[var(--flame-ink)] hover:bg-[var(--flame-lit)]"
-              >
-                <Check className="h-3.5 w-3.5" />
-                <span>{isEn ? 'Insert' : 'درج'}</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setLinkOpen(false)}
-                aria-label={isEn ? 'Close link popover' : 'بستن درج لینک'}
-                className="cursor-pointer rounded-lg border border-[var(--hair-strong)] p-1.5 text-[var(--ink-muted)] hover:text-[var(--ink)]"
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            </div>
           </div>
-          {linkError && <p className="mt-1.5 text-[11px] text-[var(--status-error-ink)]">{linkError}</p>}
+          {linkErr && <p className="mt-1.5 text-[11px] text-[var(--status-error-ink)]">{linkErr}</p>}
+          <div className="mt-2.5 flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setLinkOpen(false)}
+              className="cursor-pointer rounded-lg border border-[var(--hair-strong)] px-2.5 py-1 text-[11px] text-[var(--ink-muted)] hover:text-[var(--ink)]"
+            >
+              {isUiEn ? 'Cancel' : 'انصراف'}
+            </button>
+            <button
+              type="button"
+              onClick={handleConfirmLink}
+              className="ember-btn-flame cursor-pointer rounded-lg px-3 py-1 text-[11px]"
+            >
+              {isUiEn ? 'Insert Link' : 'درج لینک'}
+            </button>
+          </div>
         </div>
       )}
     </div>
@@ -274,138 +330,193 @@ export function PostBlockBuilder({
   adminLang = 'fa',
   contentLang = 'fa',
 }: PostBlockBuilderProps) {
-  const isEn = adminLang === 'en';
-  const contentDir = contentLang === 'en' ? 'ltr' : 'rtl';
-  const palette = isEn ? BLOCK_PALETTE_EN : BLOCK_PALETTE_FA;
-  const blockLabels = isEn ? BLOCK_LABELS_EN : BLOCK_LABELS_FA;
+  const isUiEn = adminLang === 'en';
+  const isContentEn = contentLang === 'en';
+  const contentDir = isContentEn ? 'ltr' : 'rtl';
+  const palette = getBlockPalette(isUiEn);
 
-  const [previewMode, setPreviewMode] = useState(false);
+  const [mode, setMode] = useState<'edit' | 'preview'>('edit');
   const [uploadingId, setUploadingId] = useState<string | null>(null);
+  const [dragReadyIndex, setDragReadyIndex] = useState<number | null>(null);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
-  const textareaRefs = useRef<Record<string, HTMLTextAreaElement | null>>({});
-  const selectionMemory = useRef<Record<string, { start: number; end: number }>>({});
+  const [activeSelection, setActiveSelection] = useState<{
+    key: string;
+    start: number;
+    end: number;
+  } | null>(null);
 
-  const rememberSelection = (refKey: string, el: HTMLTextAreaElement) => {
-    selectionMemory.current[refKey] = {
-      start: el.selectionStart ?? el.value.length,
-      end: el.selectionEnd ?? el.value.length,
+  const fieldRefs = useRef<Record<string, HTMLTextAreaElement | HTMLInputElement | null>>({});
+
+  // Reset dragReadyIndex whenever the user releases the mouse anywhere so text selection is never blocked
+  useEffect(() => {
+    if (dragReadyIndex === null) return;
+    const clearReady = () => setDragReadyIndex(null);
+    window.addEventListener('pointerup', clearReady);
+    window.addEventListener('mouseup', clearReady);
+    return () => {
+      window.removeEventListener('pointerup', clearReady);
+      window.removeEventListener('mouseup', clearReady);
     };
+  }, [dragReadyIndex]);
+
+  const registerFieldRef =
+    (key: string) => (el: HTMLTextAreaElement | HTMLInputElement | null) => {
+      fieldRefs.current[key] = el;
+    };
+
+  const syncSelection = (key: string, el: HTMLTextAreaElement | HTMLInputElement | null) => {
+    if (!el) return;
+    const start = el.selectionStart ?? el.value.length;
+    const end = el.selectionEnd ?? start;
+    setActiveSelection({ key, start, end });
+  };
+
+  const getActiveFormatsForField = (key: string, currentValue: string): ActiveInlineFormats => {
+    if (!activeSelection || activeSelection.key !== key) return EMPTY_ACTIVE_FORMATS;
+    return detectActiveFormats(currentValue, activeSelection.start, activeSelection.end);
+  };
+
+  const updateBlock = (index: number, nextBlock: ContentBlock) => {
+    const copy = [...blocks];
+    copy[index] = nextBlock;
+    onChange(copy);
   };
 
   const addBlock = (type: BlockType) => {
-    setPreviewMode(false);
     onChange([...blocks, createEmptyBlock(type)]);
   };
 
-  const updateBlock = (index: number, next: ContentBlock) => {
-    const copy = [...blocks];
-    copy[index] = next;
-    onChange(copy);
-  };
-
-  const duplicateBlock = (index: number) => {
-    const original = blocks[index];
-    const cloned = {
-      ...original,
-      id: `blk_${Math.random().toString(36).slice(2, 10)}`,
-    } as ContentBlock;
-    const copy = [...blocks];
-    copy.splice(index + 1, 0, cloned);
-    onChange(copy);
-  };
-
   const removeBlock = (index: number) => {
-    onChange(blocks.filter((_, idx) => idx !== index));
+    const next = blocks.filter((_, i) => i !== index);
+    onChange(next.length > 0 ? next : [createEmptyBlock('paragraph')]);
   };
 
-  const getSelectionRange = (refKey: string, currentValue: string) => {
-    const el = textareaRefs.current[refKey];
-    if (el && document.activeElement === el) {
-      return {
-        start: el.selectionStart ?? currentValue.length,
-        end: el.selectionEnd ?? currentValue.length,
-      };
-    }
-    const mem = selectionMemory.current[refKey];
-    if (mem) {
-      return {
-        start: Math.min(mem.start, currentValue.length),
-        end: Math.min(mem.end, currentValue.length),
-      };
-    }
-    return { start: currentValue.length, end: currentValue.length };
+  const moveBlock = (index: number, direction: -1 | 1) => {
+    const target = index + direction;
+    if (target < 0 || target >= blocks.length) return;
+    onChange(reorderArray(blocks, index, target));
   };
 
-  const applyInlineWrap = (
-    refKey: string,
-    currentValue: string,
-    onApply: (nextValue: string) => void,
-    prefix: string,
-    suffix: string,
-    fallback: string,
+  const restoreFocusAndSelection = (
+    el: HTMLTextAreaElement | HTMLInputElement | null,
+    key: string,
+    start: number,
+    end: number,
   ) => {
-    const el = textareaRefs.current[refKey];
-    const { start, end } = getSelectionRange(refKey, currentValue);
-    const selected = currentValue.slice(start, end) || fallback;
-    const nextValue =
-      currentValue.slice(0, start) + prefix + selected + suffix + currentValue.slice(end);
-    onApply(nextValue);
-
-    const nextStart = start + prefix.length;
-    const nextEnd = nextStart + selected.length;
-    selectionMemory.current[refKey] = { start: nextStart, end: nextEnd };
-
+    setActiveSelection({ key, start, end });
     requestAnimationFrame(() => {
-      if (el) {
-        el.focus();
-        try {
-          el.setSelectionRange(nextStart, nextEnd);
-        } catch {
-          // ignore on unsupported inputs
-        }
+      if (!el) return;
+      el.focus();
+      try {
+        el.setSelectionRange(start, end);
+      } catch {
+        // ignore selection range errors on unsupported inputs
       }
     });
+  };
+
+  const applyInlineFormat = (
+    fieldKey: string,
+    currentValue: string,
+    onUpdateValue: (val: string) => void,
+    kind: InlineFormatKind,
+  ) => {
+    const el = fieldRefs.current[fieldKey];
+    const start = el?.selectionStart ?? activeSelection?.start ?? currentValue.length;
+    const end = el?.selectionEnd ?? activeSelection?.end ?? start;
+
+    const result = toggleInlineFormat(currentValue, start, end, kind, contentLang);
+    if (result.value !== currentValue) {
+      onUpdateValue(result.value);
+    }
+    restoreFocusAndSelection(el, fieldKey, result.selectionStart, result.selectionEnd);
+  };
+
+  const applyExitFormat = (fieldKey: string, currentValue: string) => {
+    const el = fieldRefs.current[fieldKey];
+    const cursor = el?.selectionEnd ?? activeSelection?.end ?? currentValue.length;
+    const res = exitInlineFormat(currentValue, cursor);
+    if (res.exited) {
+      restoreFocusAndSelection(el, fieldKey, res.cursor, res.cursor);
+    } else if (el) {
+      el.focus();
+    }
   };
 
   const applyInlineLink = (
-    refKey: string,
+    fieldKey: string,
     currentValue: string,
-    onApply: (nextValue: string) => void,
+    onUpdateValue: (val: string) => void,
     label: string,
     url: string,
   ) => {
-    const el = textareaRefs.current[refKey];
-    const { start, end } = getSelectionRange(refKey, currentValue);
-    const inserted = `[${label}](${url})`;
-    const nextValue = currentValue.slice(0, start) + inserted + currentValue.slice(end);
-    onApply(nextValue);
+    const el = fieldRefs.current[fieldKey];
+    const start = el?.selectionStart ?? activeSelection?.start ?? currentValue.length;
+    const end = el?.selectionEnd ?? activeSelection?.end ?? start;
+    const result = insertInlineLink(currentValue, start, end, label, url);
+    onUpdateValue(result.value);
+    restoreFocusAndSelection(el, fieldKey, result.cursor, result.cursor);
+  };
 
-    const cursorPos = start + inserted.length;
-    selectionMemory.current[refKey] = { start: cursorPos, end: cursorPos };
+  const getFieldSelectedText = (fieldKey: string, currentValue: string): string => {
+    const el = fieldRefs.current[fieldKey];
+    if (!el) return '';
+    const start = el.selectionStart ?? 0;
+    const end = el.selectionEnd ?? 0;
+    return currentValue.slice(start, end);
+  };
 
-    requestAnimationFrame(() => {
-      if (el) {
-        el.focus();
-        try {
-          el.setSelectionRange(cursorPos, cursorPos);
-        } catch {
-          // ignore
-        }
+  const handleFormattedKeyDown = (
+    e: ReactKeyboardEvent<HTMLTextAreaElement>,
+    fieldKey: string,
+    currentValue: string,
+    onUpdateValue: (val: string) => void,
+  ) => {
+    const mod = e.ctrlKey || e.metaKey;
+    const lowerKey = e.key.toLowerCase();
+
+    if (mod && !e.shiftKey && lowerKey === 'b') {
+      e.preventDefault();
+      applyInlineFormat(fieldKey, currentValue, onUpdateValue, 'bold');
+      return;
+    }
+    if (mod && !e.shiftKey && lowerKey === 'i') {
+      e.preventDefault();
+      applyInlineFormat(fieldKey, currentValue, onUpdateValue, 'italic');
+      return;
+    }
+    if (mod && e.shiftKey && lowerKey === 'h') {
+      e.preventDefault();
+      applyInlineFormat(fieldKey, currentValue, onUpdateValue, 'highlight');
+      return;
+    }
+    if (mod && !e.shiftKey && lowerKey === 'e') {
+      e.preventDefault();
+      applyInlineFormat(fieldKey, currentValue, onUpdateValue, 'code');
+      return;
+    }
+    if (e.key === 'Escape') {
+      const el = e.currentTarget;
+      const cursor = el.selectionEnd ?? currentValue.length;
+      const res = exitInlineFormat(currentValue, cursor);
+      if (res.exited) {
+        e.preventDefault();
+        restoreFocusAndSelection(el, fieldKey, res.cursor, res.cursor);
       }
-    });
+    }
   };
 
   const handleMediaUpload = async (
     index: number,
-    block: ContentBlock,
-    file: File | undefined,
+    block: Extract<ContentBlock, { type: 'image' | 'video' | 'audio' }>,
+    file?: File | null,
   ) => {
     if (!file) return;
     setUploadingId(block.id);
     try {
       const url = await onUploadFile(file);
-      if (url && (block.type === 'image' || block.type === 'video' || block.type === 'audio')) {
+      if (url) {
         updateBlock(index, { ...block, url });
       }
     } finally {
@@ -413,60 +524,52 @@ export function PostBlockBuilder({
     }
   };
 
-  const handleDropBlock = (targetIndex: number) => {
-    if (dragIndex !== null && dragIndex !== targetIndex) {
-      onChange(reorderArray(blocks, dragIndex, targetIndex));
-    }
-    setDragIndex(null);
-    setDragOverIndex(null);
-  };
-
   const inputBase =
-    'rounded-xl border border-[var(--hair-strong)] bg-[var(--ground-deep)] text-[var(--ink)] placeholder:text-[var(--ink-faint)] focus:border-[var(--flame)] focus:outline-none';
+    'rounded-xl border border-[var(--hair-strong)] bg-[var(--ground-deep)] text-[var(--ink)] placeholder:text-[var(--ink-faint)] focus:border-[var(--flame)] focus:outline-none select-text';
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
-          <span className="text-xs font-bold text-[var(--ink)]">
-            {isEn ? `Content Blocks (${blocks.length})` : `بلوک‌های محتوا (${blocks.length})`}
-          </span>
-          <span className="ms-2 text-[11px] text-[var(--ink-faint)]">
-            {isEn ? '(Drag the handle to reorder blocks)' : '(با کشیدن دستگیره می‌توانید ترتیب را تغییر دهید)'}
+          <span className="text-xs font-medium text-[var(--ink-muted)]">
+            {isUiEn
+              ? `Content Blocks (${blocks.length}) — Drag the grip icon to reorder`
+              : `بلوک‌های محتوا (${blocks.length}) — برای جابه‌جایی دستگیره کنار هر بلوک را بکش`}
           </span>
         </div>
-        <div className="inline-flex rounded-xl border border-[var(--hair-strong)] bg-[var(--ground-deep)] p-1">
+
+        <div className="inline-flex rounded-xl border border-[var(--hair)] bg-[var(--ground-deep)] p-1">
           <button
             type="button"
-            onClick={() => setPreviewMode(false)}
-            className={`inline-flex cursor-pointer items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
-              !previewMode
+            onClick={() => setMode('edit')}
+            className={`inline-flex cursor-pointer items-center gap-1.5 rounded-lg px-3 py-1 text-xs font-medium transition-colors ${
+              mode === 'edit'
                 ? 'bg-[var(--flame)] font-bold text-[var(--flame-ink)]'
                 : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
             }`}
           >
             <PenLine className="h-3.5 w-3.5" />
-            <span>{isEn ? 'Editor' : 'ویرایشگر'}</span>
+            <span>{isUiEn ? 'Edit' : 'ویرایش'}</span>
           </button>
           <button
             type="button"
-            onClick={() => setPreviewMode(true)}
-            className={`inline-flex cursor-pointer items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
-              previewMode
+            onClick={() => setMode('preview')}
+            className={`inline-flex cursor-pointer items-center gap-1.5 rounded-lg px-3 py-1 text-xs font-medium transition-colors ${
+              mode === 'preview'
                 ? 'bg-[var(--flame)] font-bold text-[var(--flame-ink)]'
                 : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
             }`}
           >
             <Eye className="h-3.5 w-3.5" />
-            <span>{isEn ? 'Live Preview' : 'پیش‌نمایش زنده'}</span>
+            <span>{isUiEn ? 'Live Preview' : 'پیش‌نمایش زنده'}</span>
           </button>
         </div>
       </div>
 
-      {previewMode ? (
+      {mode === 'preview' ? (
         <div
           dir={contentDir}
-          className="rounded-2xl border border-[var(--hair-strong)] bg-[var(--ground-deep)] p-6"
+          className="min-h-48 rounded-2xl border border-[var(--hair)] bg-[var(--ground-deep)] p-5 sm:p-7"
         >
           <BlockRenderer blocks={blocks} lang={contentLang} />
         </div>
@@ -476,15 +579,21 @@ export function PostBlockBuilder({
             {blocks.map((block, index) => {
               const isDropTarget =
                 dragOverIndex === index && dragIndex !== null && dragIndex !== index;
-              const videoParsed = block.type === 'video' ? parseVideoEmbed(block.url) : null;
+              const isDragging = dragIndex === index;
+              const videoParsed =
+                block.type === 'video' && block.url.trim() ? parseVideoEmbed(block.url) : null;
+
+              const paraKey = `${block.id}:paragraph`;
+              const cardKey = `${block.id}:card`;
+              const quoteKey = `${block.id}:quote`;
+              const listKey = `${block.id}:list`;
 
               return (
                 <div
                   key={block.id}
-                  draggable
+                  draggable={dragReadyIndex === index}
                   onDragStart={(e) => {
-                    const tag = (e.target as HTMLElement)?.tagName;
-                    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
+                    if (dragReadyIndex !== index) {
                       e.preventDefault();
                       return;
                     }
@@ -498,66 +607,77 @@ export function PostBlockBuilder({
                     e.dataTransfer.dropEffect = 'move';
                     if (dragOverIndex !== index) setDragOverIndex(index);
                   }}
+                  onDragLeave={() => {
+                    if (dragOverIndex === index) setDragOverIndex(null);
+                  }}
                   onDrop={(e) => {
                     e.preventDefault();
-                    handleDropBlock(index);
+                    if (dragIndex !== null && dragIndex !== index) {
+                      onChange(reorderArray(blocks, dragIndex, index));
+                    }
+                    setDragIndex(null);
+                    setDragOverIndex(null);
+                    setDragReadyIndex(null);
                   }}
                   onDragEnd={() => {
                     setDragIndex(null);
                     setDragOverIndex(null);
+                    setDragReadyIndex(null);
                   }}
                   className={`rounded-2xl border bg-[var(--ground)] p-4 transition-all ${
                     isDropTarget
                       ? 'border-[var(--flame)] ring-2 ring-[var(--flame-border)]'
-                      : dragIndex === index
-                        ? 'border-[var(--flame-border)] opacity-60'
+                      : isDragging
+                        ? 'border-[var(--flame-border)] opacity-55'
                         : 'border-[var(--hair)]'
                   }`}
                 >
-                  <div className="mb-3 flex items-center justify-between gap-2 border-b border-[var(--hair)] pb-2.5">
+                  <div className="mb-3 flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
-                      <span
-                        title={isEn ? 'Drag to reorder' : 'بکشید برای جابه‌جایی'}
-                        className="inline-flex cursor-grab items-center rounded-md p-1 text-[var(--ink-faint)] hover:bg-[var(--surface)] hover:text-[var(--ink)] active:cursor-grabbing"
+                      <button
+                        type="button"
+                        onPointerDown={() => setDragReadyIndex(index)}
+                        onMouseDown={() => setDragReadyIndex(index)}
+                        onPointerUp={() => setDragReadyIndex(null)}
+                        onMouseUp={() => setDragReadyIndex(null)}
+                        title={isUiEn ? 'Drag to reorder' : 'بکش و جابه‌جا کن'}
+                        aria-label={isUiEn ? `Drag block ${index + 1}` : `جابه‌جایی بلوک ${index + 1}`}
+                        className="inline-flex cursor-grab rounded-lg p-1 text-[var(--ink-faint)] hover:bg-[var(--surface)] hover:text-[var(--ink)] active:cursor-grabbing"
                       >
                         <GripVertical className="h-4 w-4" />
+                      </button>
+                      <span className="rounded-lg border border-[var(--flame-border)] bg-[var(--flame-tint)] px-2 py-0.5 text-[11px] font-bold text-[var(--flame)]">
+                        {getBlockLabel(block.type, isUiEn)}
                       </span>
-                      <span className="text-xs font-bold text-[var(--flame)]">
-                        {blockLabels[block.type]}
+                      <span className="text-[11px] text-[var(--ink-faint)] tabular-nums">
+                        #{index + 1}
                       </span>
                     </div>
+
                     <div className="flex items-center gap-1">
                       <button
                         type="button"
-                        onClick={() => onChange(moveBlock(blocks, index, -1))}
+                        onClick={() => moveBlock(index, -1)}
                         disabled={index === 0}
-                        aria-label={isEn ? 'Move block up' : 'انتقال بلوک به بالا'}
-                        className="rounded-lg p-1.5 text-[var(--ink-muted)] hover:bg-[var(--surface)] hover:text-[var(--ink)] disabled:opacity-30"
+                        aria-label={isUiEn ? 'Move block up' : 'انتقال به بالا'}
+                        className="cursor-pointer rounded-lg p-1.5 text-[var(--ink-muted)] hover:bg-[var(--surface)] disabled:opacity-30"
                       >
                         <ArrowUp className="h-3.5 w-3.5" />
                       </button>
                       <button
                         type="button"
-                        onClick={() => onChange(moveBlock(blocks, index, 1))}
+                        onClick={() => moveBlock(index, 1)}
                         disabled={index === blocks.length - 1}
-                        aria-label={isEn ? 'Move block down' : 'انتقال بلوک به پایین'}
-                        className="rounded-lg p-1.5 text-[var(--ink-muted)] hover:bg-[var(--surface)] hover:text-[var(--ink)] disabled:opacity-30"
+                        aria-label={isUiEn ? 'Move block down' : 'انتقال به پایین'}
+                        className="cursor-pointer rounded-lg p-1.5 text-[var(--ink-muted)] hover:bg-[var(--surface)] disabled:opacity-30"
                       >
                         <ArrowDown className="h-3.5 w-3.5" />
                       </button>
                       <button
                         type="button"
-                        onClick={() => duplicateBlock(index)}
-                        aria-label={isEn ? 'Duplicate block' : 'تکرار بلوک'}
-                        className="rounded-lg p-1.5 text-[var(--ink-muted)] hover:bg-[var(--surface)] hover:text-[var(--ink)]"
-                      >
-                        <CopyPlus className="h-3.5 w-3.5" />
-                      </button>
-                      <button
-                        type="button"
                         onClick={() => removeBlock(index)}
-                        aria-label={isEn ? 'Delete block' : 'حذف بلوک'}
-                        className="rounded-lg p-1.5 text-[var(--status-error-ink)] hover:bg-red-500/15"
+                        aria-label={isUiEn ? 'Delete block' : 'حذف بلوک'}
+                        className="cursor-pointer rounded-lg p-1.5 text-[var(--status-error-ink)] hover:bg-red-500/15"
                       >
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
@@ -572,60 +692,64 @@ export function PostBlockBuilder({
                       onChange={(e) => updateBlock(index, { ...block, text: e.target.value })}
                       placeholder={
                         block.type === 'h2'
-                          ? isEn
-                            ? 'Main Heading...'
-                            : 'تیتر اصلی...'
-                          : isEn
-                            ? 'Subheading...'
-                            : 'تیتر فرعی...'
+                          ? isUiEn
+                            ? 'Main section heading (H2)'
+                            : 'عنوان بخش اصلی (H2)'
+                          : isUiEn
+                            ? 'Subheading (H3)'
+                            : 'زیرتیتر (H3)'
                       }
                       className={`w-full px-3.5 py-2.5 text-sm font-bold ${inputBase}`}
                     />
                   )}
 
                   {block.type === 'paragraph' && (
-                    <div>
-                      <InlineFormatBar
-                        isEn={isEn}
-                        getSelectedText={() => {
-                          const { start, end } = getSelectionRange(`${block.id}_p`, block.text);
-                          return block.text.slice(start, end);
-                        }}
-                        onWrap={(prefix, suffix, fallback) =>
-                          applyInlineWrap(
-                            `${block.id}_p`,
+                    <div className="space-y-2">
+                      <InlineFormatToolbar
+                        isUiEn={isUiEn}
+                        isContentEn={isContentEn}
+                        activeFormats={getActiveFormatsForField(paraKey, block.text)}
+                        onToggleFormat={(kind) =>
+                          applyInlineFormat(
+                            paraKey,
                             block.text,
-                            (text) => updateBlock(index, { ...block, text }),
-                            prefix,
-                            suffix,
-                            fallback,
+                            (val) => updateBlock(index, { ...block, text: val }),
+                            kind,
                           )
                         }
+                        onExitFormat={() => applyExitFormat(paraKey, block.text)}
                         onInsertLink={(label, url) =>
                           applyInlineLink(
-                            `${block.id}_p`,
+                            paraKey,
                             block.text,
-                            (text) => updateBlock(index, { ...block, text }),
+                            (val) => updateBlock(index, { ...block, text: val }),
                             label,
                             url,
                           )
                         }
+                        getSelectedText={() => getFieldSelectedText(paraKey, block.text)}
                       />
                       <textarea
-                        ref={(el) => {
-                          textareaRefs.current[`${block.id}_p`] = el;
-                        }}
-                        dir={contentDir}
+                        ref={registerFieldRef(paraKey)}
                         rows={4}
+                        dir={contentDir}
                         value={block.text}
-                        onSelect={(e) => rememberSelection(`${block.id}_p`, e.currentTarget)}
-                        onKeyUp={(e) => rememberSelection(`${block.id}_p`, e.currentTarget)}
-                        onMouseUp={(e) => rememberSelection(`${block.id}_p`, e.currentTarget)}
+                        onFocus={(e) => syncSelection(paraKey, e.currentTarget)}
+                        onSelect={(e) => syncSelection(paraKey, e.currentTarget)}
+                        onKeyUp={(e) => syncSelection(paraKey, e.currentTarget)}
+                        onMouseUp={(e) => syncSelection(paraKey, e.currentTarget)}
+                        onKeyDown={(e) =>
+                          handleFormattedKeyDown(e, paraKey, block.text, (val) =>
+                            updateBlock(index, { ...block, text: val }),
+                          )
+                        }
                         onChange={(e) => {
-                          rememberSelection(`${block.id}_p`, e.currentTarget);
                           updateBlock(index, { ...block, text: e.target.value });
+                          syncSelection(paraKey, e.currentTarget);
                         }}
-                        placeholder={isEn ? 'Write paragraph text...' : 'متن پاراگراف...'}
+                        placeholder={
+                          isUiEn ? 'Write paragraph text' : 'متن پاراگراف...'
+                        }
                         className={`w-full px-3.5 py-2.5 text-sm leading-7 ${inputBase}`}
                       />
                     </div>
@@ -633,14 +757,14 @@ export function PostBlockBuilder({
 
                   {block.type === 'card' && (
                     <div className="space-y-2.5">
-                      <div className="flex flex-wrap items-center gap-2">
+                      <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
                         <input
                           type="text"
                           dir={contentDir}
                           value={block.title}
                           onChange={(e) => updateBlock(index, { ...block, title: e.target.value })}
-                          placeholder={isEn ? 'Card title' : 'عنوان کارت'}
-                          className={`flex-1 px-3.5 py-2 text-sm font-semibold ${inputBase}`}
+                          placeholder={isUiEn ? 'Card title' : 'عنوان کارت'}
+                          className={`px-3.5 py-2 text-sm font-semibold sm:col-span-2 ${inputBase}`}
                         />
                         <select
                           value={block.accent || 'flame'}
@@ -650,54 +774,60 @@ export function PostBlockBuilder({
                               accent: e.target.value === 'neutral' ? 'neutral' : 'flame',
                             })
                           }
-                          aria-label={isEn ? 'Card accent style' : 'رنگ کارت'}
+                          aria-label={isUiEn ? 'Card color' : 'رنگ کارت'}
                           className={`px-3 py-2 text-xs ${inputBase}`}
                         >
-                          <option value="flame">{isEn ? 'Highlighted (Accent)' : 'برجسته (رنگ اصلی)'}</option>
-                          <option value="neutral">{isEn ? 'Neutral' : 'ساده'}</option>
+                          <option value="flame">
+                            {isUiEn ? 'Accent Card (Highlight)' : 'کارت نارنجی (تاکید)'}
+                          </option>
+                          <option value="neutral">
+                            {isUiEn ? 'Neutral Card (Subtle)' : 'کارت خنثی (ساده)'}
+                          </option>
                         </select>
                       </div>
-                      <InlineFormatBar
-                        isEn={isEn}
-                        getSelectedText={() => {
-                          const { start, end } = getSelectionRange(`${block.id}_card`, block.body);
-                          return block.body.slice(start, end);
-                        }}
-                        onWrap={(prefix, suffix, fallback) =>
-                          applyInlineWrap(
-                            `${block.id}_card`,
+                      <InlineFormatToolbar
+                        isUiEn={isUiEn}
+                        isContentEn={isContentEn}
+                        activeFormats={getActiveFormatsForField(cardKey, block.body)}
+                        onToggleFormat={(kind) =>
+                          applyInlineFormat(
+                            cardKey,
                             block.body,
-                            (body) => updateBlock(index, { ...block, body }),
-                            prefix,
-                            suffix,
-                            fallback,
+                            (val) => updateBlock(index, { ...block, body: val }),
+                            kind,
                           )
                         }
+                        onExitFormat={() => applyExitFormat(cardKey, block.body)}
                         onInsertLink={(label, url) =>
                           applyInlineLink(
-                            `${block.id}_card`,
+                            cardKey,
                             block.body,
-                            (body) => updateBlock(index, { ...block, body }),
+                            (val) => updateBlock(index, { ...block, body: val }),
                             label,
                             url,
                           )
                         }
+                        getSelectedText={() => getFieldSelectedText(cardKey, block.body)}
                       />
                       <textarea
-                        ref={(el) => {
-                          textareaRefs.current[`${block.id}_card`] = el;
-                        }}
-                        dir={contentDir}
+                        ref={registerFieldRef(cardKey)}
                         rows={3}
+                        dir={contentDir}
                         value={block.body}
-                        onSelect={(e) => rememberSelection(`${block.id}_card`, e.currentTarget)}
-                        onKeyUp={(e) => rememberSelection(`${block.id}_card`, e.currentTarget)}
-                        onMouseUp={(e) => rememberSelection(`${block.id}_card`, e.currentTarget)}
+                        onFocus={(e) => syncSelection(cardKey, e.currentTarget)}
+                        onSelect={(e) => syncSelection(cardKey, e.currentTarget)}
+                        onKeyUp={(e) => syncSelection(cardKey, e.currentTarget)}
+                        onMouseUp={(e) => syncSelection(cardKey, e.currentTarget)}
+                        onKeyDown={(e) =>
+                          handleFormattedKeyDown(e, cardKey, block.body, (val) =>
+                            updateBlock(index, { ...block, body: val }),
+                          )
+                        }
                         onChange={(e) => {
-                          rememberSelection(`${block.id}_card`, e.currentTarget);
                           updateBlock(index, { ...block, body: e.target.value });
+                          syncSelection(cardKey, e.currentTarget);
                         }}
-                        placeholder={isEn ? 'Card body text...' : 'متن کارت...'}
+                        placeholder={isUiEn ? 'Card body text' : 'متن کارت...'}
                         className={`w-full px-3.5 py-2 text-sm leading-7 ${inputBase}`}
                       />
                     </div>
@@ -710,16 +840,16 @@ export function PostBlockBuilder({
                         dir={contentDir}
                         value={block.label}
                         onChange={(e) => updateBlock(index, { ...block, label: e.target.value })}
-                        placeholder={isEn ? 'Button label' : 'عنوان دکمه'}
-                        className={`px-3.5 py-2 text-sm ${inputBase}`}
+                        placeholder={isUiEn ? 'Button label' : 'عنوان دکمه'}
+                        className={`px-3.5 py-2 text-xs ${inputBase}`}
                       />
                       <input
                         type="text"
                         dir="ltr"
                         value={block.url}
                         onChange={(e) => updateBlock(index, { ...block, url: e.target.value })}
-                        placeholder={isEn ? 'https://... or /projects' : 'https://... یا /projects'}
-                        className={`px-3.5 py-2 text-sm ${inputBase}`}
+                        placeholder="https://... or /projects"
+                        className={`px-3.5 py-2 text-xs ${inputBase}`}
                       />
                       <select
                         value={block.variant || 'primary'}
@@ -729,11 +859,15 @@ export function PostBlockBuilder({
                             variant: e.target.value === 'secondary' ? 'secondary' : 'primary',
                           })
                         }
-                        aria-label={isEn ? 'Button style' : 'استایل دکمه'}
+                        aria-label={isUiEn ? 'Button style' : 'استایل دکمه'}
                         className={`px-3 py-2 text-xs ${inputBase}`}
                       >
-                        <option value="primary">{isEn ? 'Primary (Accent)' : 'اصلی (رنگ تاکید)'}</option>
-                        <option value="secondary">{isEn ? 'Secondary (Subtle)' : 'ثانویه (ساده)'}</option>
+                        <option value="primary">
+                          {isUiEn ? 'Primary (Accent)' : 'دکمه اصلی (نارنجی)'}
+                        </option>
+                        <option value="secondary">
+                          {isUiEn ? 'Secondary (Outline)' : 'دکمه ثانویه (ساده)'}
+                        </option>
                       </select>
                     </div>
                   )}
@@ -746,8 +880,8 @@ export function PostBlockBuilder({
                           dir={contentDir}
                           value={block.title}
                           onChange={(e) => updateBlock(index, { ...block, title: e.target.value })}
-                          placeholder={isEn ? 'Link title' : 'عنوان لینک'}
-                          className={`px-3.5 py-2 text-sm ${inputBase}`}
+                          placeholder={isUiEn ? 'Link title' : 'عنوان لینک'}
+                          className={`px-3.5 py-2 text-xs ${inputBase}`}
                         />
                         <input
                           type="text"
@@ -755,7 +889,7 @@ export function PostBlockBuilder({
                           value={block.url}
                           onChange={(e) => updateBlock(index, { ...block, url: e.target.value })}
                           placeholder="https://..."
-                          className={`px-3.5 py-2 text-sm ${inputBase}`}
+                          className={`px-3.5 py-2 text-xs ${inputBase}`}
                         />
                       </div>
                       <input
@@ -765,55 +899,59 @@ export function PostBlockBuilder({
                         onChange={(e) =>
                           updateBlock(index, { ...block, description: e.target.value })
                         }
-                        placeholder={isEn ? 'Short description (optional)' : 'توضیح کوتاه (اختیاری)'}
+                        placeholder={
+                          isUiEn ? 'Short description (optional)' : 'توضیح کوتاه (اختیاری)'
+                        }
                         className={`w-full px-3.5 py-2 text-xs ${inputBase}`}
                       />
                     </div>
                   )}
 
                   {block.type === 'quote' && (
-                    <div className="space-y-2.5">
-                      <InlineFormatBar
-                        isEn={isEn}
-                        getSelectedText={() => {
-                          const { start, end } = getSelectionRange(`${block.id}_q`, block.text);
-                          return block.text.slice(start, end);
-                        }}
-                        onWrap={(prefix, suffix, fallback) =>
-                          applyInlineWrap(
-                            `${block.id}_q`,
+                    <div className="space-y-2">
+                      <InlineFormatToolbar
+                        isUiEn={isUiEn}
+                        isContentEn={isContentEn}
+                        activeFormats={getActiveFormatsForField(quoteKey, block.text)}
+                        onToggleFormat={(kind) =>
+                          applyInlineFormat(
+                            quoteKey,
                             block.text,
-                            (text) => updateBlock(index, { ...block, text }),
-                            prefix,
-                            suffix,
-                            fallback,
+                            (val) => updateBlock(index, { ...block, text: val }),
+                            kind,
                           )
                         }
+                        onExitFormat={() => applyExitFormat(quoteKey, block.text)}
                         onInsertLink={(label, url) =>
                           applyInlineLink(
-                            `${block.id}_q`,
+                            quoteKey,
                             block.text,
-                            (text) => updateBlock(index, { ...block, text }),
+                            (val) => updateBlock(index, { ...block, text: val }),
                             label,
                             url,
                           )
                         }
+                        getSelectedText={() => getFieldSelectedText(quoteKey, block.text)}
                       />
                       <textarea
-                        ref={(el) => {
-                          textareaRefs.current[`${block.id}_q`] = el;
-                        }}
-                        dir={contentDir}
+                        ref={registerFieldRef(quoteKey)}
                         rows={2}
+                        dir={contentDir}
                         value={block.text}
-                        onSelect={(e) => rememberSelection(`${block.id}_q`, e.currentTarget)}
-                        onKeyUp={(e) => rememberSelection(`${block.id}_q`, e.currentTarget)}
-                        onMouseUp={(e) => rememberSelection(`${block.id}_q`, e.currentTarget)}
+                        onFocus={(e) => syncSelection(quoteKey, e.currentTarget)}
+                        onSelect={(e) => syncSelection(quoteKey, e.currentTarget)}
+                        onKeyUp={(e) => syncSelection(quoteKey, e.currentTarget)}
+                        onMouseUp={(e) => syncSelection(quoteKey, e.currentTarget)}
+                        onKeyDown={(e) =>
+                          handleFormattedKeyDown(e, quoteKey, block.text, (val) =>
+                            updateBlock(index, { ...block, text: val }),
+                          )
+                        }
                         onChange={(e) => {
-                          rememberSelection(`${block.id}_q`, e.currentTarget);
                           updateBlock(index, { ...block, text: e.target.value });
+                          syncSelection(quoteKey, e.currentTarget);
                         }}
-                        placeholder={isEn ? 'Quote text...' : 'متن نقل‌قول...'}
+                        placeholder={isUiEn ? 'Quote text' : 'متن نقل‌قول...'}
                         className={`w-full px-3.5 py-2 text-sm leading-7 ${inputBase}`}
                       />
                       <input
@@ -821,25 +959,27 @@ export function PostBlockBuilder({
                         dir={contentDir}
                         value={block.author || ''}
                         onChange={(e) => updateBlock(index, { ...block, author: e.target.value })}
-                        placeholder={isEn ? 'Source / Author (optional)' : 'منبع / گوینده (اختیاری)'}
+                        placeholder={
+                          isUiEn ? 'Source / Author (optional)' : 'منبع / گوینده (اختیاری)'
+                        }
                         className={`w-full px-3.5 py-2 text-xs ${inputBase}`}
                       />
                     </div>
                   )}
 
                   {block.type === 'code' && (
-                    <div className="space-y-2.5">
+                    <div className="space-y-2.5" dir="ltr">
                       <input
                         type="text"
-                        dir="ltr"
                         value={block.language}
-                        onChange={(e) => updateBlock(index, { ...block, language: e.target.value })}
+                        onChange={(e) =>
+                          updateBlock(index, { ...block, language: e.target.value })
+                        }
                         placeholder="bash / ts / python"
-                        className={`w-40 px-3 py-1.5 font-mono text-xs ${inputBase}`}
+                        className={`w-48 px-3 py-1.5 font-mono text-xs ${inputBase}`}
                       />
                       <textarea
                         rows={5}
-                        dir="ltr"
                         value={block.code}
                         onChange={(e) => updateBlock(index, { ...block, code: e.target.value })}
                         placeholder="// code..."
@@ -849,7 +989,7 @@ export function PostBlockBuilder({
                   )}
 
                   {block.type === 'list' && (
-                    <div className="space-y-2.5">
+                    <div className="space-y-2">
                       <label className="inline-flex cursor-pointer items-center gap-2 text-xs text-[var(--ink-muted)]">
                         <input
                           type="checkbox"
@@ -859,28 +999,62 @@ export function PostBlockBuilder({
                           }
                           className="accent-[var(--flame)]"
                         />
-                        <span>{isEn ? 'Numbered list' : 'فهرست شماره‌دار'}</span>
+                        <span>{isUiEn ? 'Numbered list (1, 2, 3...)' : 'فهرست شماره‌دار'}</span>
                       </label>
-                      <textarea
-                        dir={contentDir}
-                        rows={4}
-                        value={block.items.join('\n')}
-                        onChange={(e) =>
-                          updateBlock(index, { ...block, items: e.target.value.split('\n') })
+                      <InlineFormatToolbar
+                        isUiEn={isUiEn}
+                        isContentEn={isContentEn}
+                        activeFormats={getActiveFormatsForField(listKey, block.items.join('\n'))}
+                        onToggleFormat={(kind) =>
+                          applyInlineFormat(
+                            listKey,
+                            block.items.join('\n'),
+                            (val) => updateBlock(index, { ...block, items: val.split('\n') }),
+                            kind,
+                          )
                         }
-                        placeholder={isEn ? 'One item per line...' : 'هر خط یک مورد...'}
-                        className={`w-full px-3.5 py-2 text-sm leading-7 ${inputBase}`}
+                        onExitFormat={() => applyExitFormat(listKey, block.items.join('\n'))}
+                        onInsertLink={(label, url) =>
+                          applyInlineLink(
+                            listKey,
+                            block.items.join('\n'),
+                            (val) => updateBlock(index, { ...block, items: val.split('\n') }),
+                            label,
+                            url,
+                          )
+                        }
+                        getSelectedText={() =>
+                          getFieldSelectedText(listKey, block.items.join('\n'))
+                        }
+                      />
+                      <textarea
+                        ref={registerFieldRef(listKey)}
+                        rows={4}
+                        dir={contentDir}
+                        value={block.items.join('\n')}
+                        onFocus={(e) => syncSelection(listKey, e.currentTarget)}
+                        onSelect={(e) => syncSelection(listKey, e.currentTarget)}
+                        onKeyUp={(e) => syncSelection(listKey, e.currentTarget)}
+                        onMouseUp={(e) => syncSelection(listKey, e.currentTarget)}
+                        onKeyDown={(e) =>
+                          handleFormattedKeyDown(e, listKey, block.items.join('\n'), (val) =>
+                            updateBlock(index, { ...block, items: val.split('\n') }),
+                          )
+                        }
+                        onChange={(e) => {
+                          updateBlock(index, { ...block, items: e.target.value.split('\n') });
+                          syncSelection(listKey, e.currentTarget);
+                        }}
+                        placeholder={
+                          isUiEn ? 'One item per line' : 'هر خط یک مورد...'
+                        }
+                        className={`w-full px-3.5 py-2.5 text-sm leading-7 ${inputBase}`}
                       />
                     </div>
                   )}
 
                   {block.type === 'image' && (
                     <div className="space-y-2.5">
-                      <p className="text-[11px] text-[var(--ink-faint)]">
-                        {isEn
-                          ? 'Upload directly from device (auto-optimized to WebP) or paste an external URL:'
-                          : 'می‌توانی تصویر را مستقیم از دستگاه آپلود کنی (تبدیل خودکار به WebP) یا لینک خارجی بدهی:'}
-                      </p>
                       <div className="flex flex-wrap items-center gap-2">
                         <input
                           type="text"
@@ -894,16 +1068,16 @@ export function PostBlockBuilder({
                           <Upload className="h-3.5 w-3.5 text-[var(--flame)]" />
                           <span>
                             {uploadingId === block.id
-                              ? isEn
+                              ? isUiEn
                                 ? 'Uploading...'
                                 : 'در حال آپلود...'
-                              : isEn
+                              : isUiEn
                                 ? 'Upload File'
                                 : 'آپلود از دستگاه'}
                           </span>
                           <input
                             type="file"
-                            accept="image/*,.webp,.png,.jpg,.jpeg,.gif"
+                            accept="image/*"
                             className="sr-only"
                             onChange={(e) => {
                               const file = e.target.files?.[0];
@@ -914,13 +1088,11 @@ export function PostBlockBuilder({
                         </label>
                       </div>
                       {block.url.trim() && (
-                        <div className="overflow-hidden rounded-xl border border-[var(--hair)] bg-[var(--ground-deep)] p-2">
-                          <img
-                            src={sanitizeMediaUrl(block.url)}
-                            alt={block.alt || 'Preview'}
-                            className="max-h-44 w-full rounded-lg object-contain"
-                          />
-                        </div>
+                        <img
+                          src={sanitizeMediaUrl(block.url)}
+                          alt={block.alt || 'Preview'}
+                          className="max-h-44 rounded-xl border border-[var(--hair)] object-cover"
+                        />
                       )}
                       <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
                         <input
@@ -928,15 +1100,17 @@ export function PostBlockBuilder({
                           dir={contentDir}
                           value={block.alt || ''}
                           onChange={(e) => updateBlock(index, { ...block, alt: e.target.value })}
-                          placeholder={isEn ? 'Alt text' : 'متن جایگزین (Alt)'}
+                          placeholder={isUiEn ? 'Alt text' : 'متن جایگزین (Alt)'}
                           className={`px-3 py-2 text-xs ${inputBase}`}
                         />
                         <input
                           type="text"
                           dir={contentDir}
                           value={block.caption || ''}
-                          onChange={(e) => updateBlock(index, { ...block, caption: e.target.value })}
-                          placeholder={isEn ? 'Caption (optional)' : 'زیرنویس (اختیاری)'}
+                          onChange={(e) =>
+                            updateBlock(index, { ...block, caption: e.target.value })
+                          }
+                          placeholder={isUiEn ? 'Caption (optional)' : 'زیرنویس (اختیاری)'}
                           className={`px-3 py-2 text-xs ${inputBase}`}
                         />
                       </div>
@@ -946,7 +1120,7 @@ export function PostBlockBuilder({
                   {block.type === 'video' && (
                     <div className="space-y-2.5">
                       <p className="text-[11px] text-[var(--ink-faint)]">
-                        {isEn
+                        {isUiEn
                           ? 'Supports direct Cloudinary uploads (MP4/WebM/MOV) plus YouTube & Aparat links:'
                           : 'پشتیبانی از آپلود مستقیم روی Cloudinary (MP4/WebM/MOV) و لینک مستقیم یوتیوب و آپارات:'}
                       </p>
@@ -963,10 +1137,10 @@ export function PostBlockBuilder({
                           <Upload className="h-3.5 w-3.5 text-[var(--flame)]" />
                           <span>
                             {uploadingId === block.id
-                              ? isEn
+                              ? isUiEn
                                 ? 'Uploading...'
                                 : 'در حال آپلود...'
-                              : isEn
+                              : isUiEn
                                 ? 'Upload File'
                                 : 'آپلود از دستگاه'}
                           </span>
@@ -987,14 +1161,14 @@ export function PostBlockBuilder({
                           <div className="mb-2 flex items-center justify-between text-[11px]">
                             <span className="font-medium text-[var(--flame)]">
                               {videoParsed.kind === 'youtube'
-                                ? isEn
+                                ? isUiEn
                                   ? 'Detected: YouTube embed'
                                   : 'شناسایی شد: ویدیوی یوتیوب (پخش تعبیه‌شده)'
                                 : videoParsed.kind === 'aparat'
-                                  ? isEn
+                                  ? isUiEn
                                     ? 'Detected: Aparat embed'
                                     : 'شناسایی شد: ویدیوی آپارات (پخش تعبیه‌شده)'
-                                  : isEn
+                                  : isUiEn
                                     ? 'Direct / Local video'
                                     : 'ویدیوی مستقیم / محلی'}
                             </span>
@@ -1022,8 +1196,12 @@ export function PostBlockBuilder({
                         type="text"
                         dir={contentDir}
                         value={block.caption || ''}
-                        onChange={(e) => updateBlock(index, { ...block, caption: e.target.value })}
-                        placeholder={isEn ? 'Video caption (optional)' : 'زیرنویس ویدیو (اختیاری)'}
+                        onChange={(e) =>
+                          updateBlock(index, { ...block, caption: e.target.value })
+                        }
+                        placeholder={
+                          isUiEn ? 'Video caption (optional)' : 'زیرنویس ویدیو (اختیاری)'
+                        }
                         className={`w-full px-3 py-2 text-xs ${inputBase}`}
                       />
                     </div>
@@ -1032,7 +1210,7 @@ export function PostBlockBuilder({
                   {block.type === 'audio' && (
                     <div className="space-y-2.5">
                       <p className="text-[11px] text-[var(--ink-faint)]">
-                        {isEn
+                        {isUiEn
                           ? 'Supports direct Cloudinary uploads (MP3, WAV, OGG, M4A) or direct audio links:'
                           : 'پشتیبانی از آپلود مستقیم روی Cloudinary (MP3, WAV, OGG, M4A) یا لینک مستقیم فایل صوتی:'}
                       </p>
@@ -1049,10 +1227,10 @@ export function PostBlockBuilder({
                           <Upload className="h-3.5 w-3.5 text-[var(--flame)]" />
                           <span>
                             {uploadingId === block.id
-                              ? isEn
+                              ? isUiEn
                                 ? 'Uploading...'
                                 : 'در حال آپلود...'
-                              : isEn
+                              : isUiEn
                                 ? 'Upload File'
                                 : 'آپلود از دستگاه'}
                           </span>
@@ -1084,15 +1262,17 @@ export function PostBlockBuilder({
                           dir={contentDir}
                           value={block.title || ''}
                           onChange={(e) => updateBlock(index, { ...block, title: e.target.value })}
-                          placeholder={isEn ? 'Audio title' : 'عنوان فایل صوتی'}
+                          placeholder={isUiEn ? 'Audio title' : 'عنوان فایل صوتی'}
                           className={`px-3 py-2 text-xs ${inputBase}`}
                         />
                         <input
                           type="text"
                           dir={contentDir}
                           value={block.caption || ''}
-                          onChange={(e) => updateBlock(index, { ...block, caption: e.target.value })}
-                          placeholder={isEn ? 'Caption (optional)' : 'توضیح (اختیاری)'}
+                          onChange={(e) =>
+                            updateBlock(index, { ...block, caption: e.target.value })
+                          }
+                          placeholder={isUiEn ? 'Caption (optional)' : 'توضیح (اختیاری)'}
                           className={`px-3 py-2 text-xs ${inputBase}`}
                         />
                       </div>
@@ -1105,7 +1285,7 @@ export function PostBlockBuilder({
 
           <div className="rounded-2xl border border-dashed border-[var(--hair-strong)] bg-[var(--ground-deep)] p-3">
             <p className="mb-2.5 text-[11px] font-medium text-[var(--ink-faint)]">
-              {isEn ? 'Add a new block:' : 'افزودن بلوک جدید:'}
+              {isUiEn ? 'Add a new block:' : 'افزودن بلوک جدید:'}
             </p>
             <div className="flex flex-wrap items-center gap-2">
               {palette.map(({ type, label, icon: Icon }) => (

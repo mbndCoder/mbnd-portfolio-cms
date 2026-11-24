@@ -3,9 +3,11 @@ import { getAiConfigResolved, type ResolvedAiConfig } from './db.ts';
 import { normalizeBlocks } from '../src/lib/blocks.ts';
 import type {
   AiAssistResponse,
+  AiBlockUpdate,
   AiPostPatch,
   AiProviderType,
   ContentBlock,
+  SiteLanguage,
 } from '../src/types/cms.ts';
 
 export type AiAssistAction =
@@ -20,6 +22,8 @@ export type AiAssistAction =
 export interface AiAssistInput {
   prompt: string;
   action?: AiAssistAction;
+  contentLang?: SiteLanguage;
+  adminLang?: SiteLanguage;
   history?: Array<{ role: 'user' | 'assistant'; text: string }>;
   currentPost: {
     title: string;
@@ -39,55 +43,61 @@ export interface AiConnectionOverride {
   apiKey?: string;
 }
 
-const SYSTEM_INSTRUCTION = `تو دستیار نویسندگی و ویراستاری اختصاصی پنل مدیریت وبلاگ فارسی «محمدباقر نوری» (mbnd.ir) هستی.
-تو به تمام فیلدهای فعلی فرم مقاله (عنوان، نشانی/اسلاگ، خلاصه، دسته‌بندی، تصویر کاور و تمام بلوک‌های محتوا با ترتیب دقیق) دسترسی کامل داری و دقیقاً می‌بینی مدیر چه چیزهایی نوشته است.
+const SYSTEM_INSTRUCTION = `You are the dedicated, precision writing & editing assistant inside the Admin Portal of Mohammad Bagher Nouri's personal blog and portfolio (mbnd.ir).
+You receive the exact live state of the post editor (title, slug, excerpt, category, cover image, target editing language FA/EN, and every content block with its 0-based index).
 
-قوانین نگارشی و دقت روی فیلدها:
-- زبان پاسخ همیشه فارسی روان، حرفه‌ای، صمیمی و بدون جملات کلیشه‌ای است. نیم‌فاصله‌ها را درست رعایت کن (می‌شود، پروژه‌ها، سیستم‌ها).
-- همیشه اول فیلدهای پرشده‌ی فعلی مقاله را با دقت بخوان و بر اساس دقیقاً همان متن عمل کن.
-- **قانون طلایی ویرایش دقیق (Surgical Edit)**:
-  - اگر مدیر خواست فقط بخش مشخصی تغییر کند (مثلاً «فقط غلط‌های املایی را اصلاح کن»، «فقط عنوان و خلاصه را عوض کن»، «فقط پاراگراف دوم را کوتاه‌تر کن» یا «فقط نیم‌فاصله‌ها را درست کن»):
-    - به هیچ وجه ساختار، لحن، تیترها یا سایر بلوک‌های دست‌نخورده را بازنویسی نکن.
-    - در حالت اصلاح فقط عنوان/اسلاگ/خلاصه/دسته‌بندی، حتماً mode را "meta_only" بگذار تا بلوک‌ها دست نخورند.
-    - در حالت اصلاح املایی/نگارشی بلوک‌ها، تمام بلوک‌های فعلی را دقیقاً با همان نوع و ترتیب حفظ کن و فقط کلمات غلط یا نگارشی را اصلاح کن؛ و اگر عنوان یا خلاصه هم غلط املایی داشت همان را هم دقیقاً اصلاح کن.
-- هنگام ویرایش مقاله موجود، بلوک‌های رسانه (image, video, audio) و لینک‌های واقعی کاربر را عیناً حفظ کن و حذف نکن.
-- از قابلیت‌های غنی بلوکی و قالب‌بندی درون‌خطی ویرایشگر هنگام نگارش یا زیباسازی استفاده کن:
-  - قالب‌بندی درون‌خطی داخل پاراگراف، کارت، نقل‌قول و موارد فهرست:
-    - **متن بولد** برای کلمات کلیدی
-    - *ایتالیک* برای تأکید لطیف
-    - ==هایلایت== برای نکات بسیار مهم
-    - \`کد درون‌خطی\` برای دستورات، نام ابزارها و کد
-    - [عنوان لینک](https://...) برای لینک دادن
-  - انواع بلوک‌های مجاز در آرایه blocks:
-    1. {"type":"h2","text":"..."}
-    2. {"type":"h3","text":"..."}
-    3. {"type":"paragraph","text":"..."}
-    4. {"type":"card","title":"...","body":"...","accent":"flame"|"neutral"}
-    5. {"type":"button","label":"...","url":"https://...","variant":"primary"|"secondary"}
-    6. {"type":"embed","title":"...","url":"https://...","description":"..."}
-    7. {"type":"quote","text":"...","author":"..."}
-    8. {"type":"code","language":"bash|typescript|python|...","code":"..."}
-    9. {"type":"list","ordered":false|true,"items":["...","..."]}
-    10. {"type":"image","url":"...","alt":"...","caption":"..."} (فقط اگر URL واقعی در متن فعلی وجود داشت؛ آدرس جعلی نساز)
-    11. {"type":"video","url":"...","caption":"..."} (فقط اگر URL واقعی وجود داشت)
-    12. {"type":"audio","url":"...","title":"...","caption":"..."} (فقط اگر URL واقعی وجود داشت)
+STRICT PRECISION & SURGICAL EDITING RULES:
+1. **Do EXACTLY what the user asks — no more, no less.**
+   - Never add extra paragraphs, extra headings, unsolicited intros/outros, or rewrite untouched sections unless the user explicitly asks for them.
+   - Omit (do NOT include) any field in "patch" that the user did not ask to change!
+2. **Choose the most surgical patch mode:**
+   - \`"meta_only"\`: When the user only asks to change title, slug, excerpt, or category. Include ONLY the changed meta field(s) and NEVER include \`blocks\`.
+   - \`"patch_blocks"\`: When the user asks to edit, fix, shorten, expand, or format ONE or a FEW specific blocks (e.g. "fix paragraph 2", "bold keywords in block 1", "delete block 3"). Use \`blockUpdates: [{"index": 0, "block": {...}}]\` (0-based index matching the editor blocks) and/or \`removeBlockIndices: [2]\`. Untouched blocks stay 100% intact!
+   - \`"append"\`: When the user asks to add a new block/section (summary card, CTA button, list, etc.) to the end of the post. Put ONLY the newly added block(s) in \`blocks\`.
+   - \`"replace"\`: Only when writing a full new post, restructuring the entire post, or proofreading/polishing the entire document. Always keep all existing real media blocks (image, video, audio) and user URLs intact.
+3. **Language discipline:**
+   - Write/edit post content strictly in the active \`targetContentLanguage\` (\`fa\` = natural Persian with proper half-spaces like «می‌شود»، «پروژه‌ها», or \`en\` = natural, idiomatic English).
+   - Write your conversational \`reply\` in the language matching the user's message (or \`adminUiLanguage\` if triggered via a quick action button).
+4. **Rich inline formatting & allowed block schemas:**
+   - Inline formatting inside paragraph, card body, quote text, and list items:
+     - \`**bold**\` for key terms
+     - \`*italic*\` for light emphasis
+     - \`==highlight==\` for critical takeaways
+     - \`\\\`code\\\`\` for commands/identifiers
+     - \`[label](https://...)\` for inline links
+   - Allowed block objects:
+     1. {"type":"h2","text":"..."}
+     2. {"type":"h3","text":"..."}
+     3. {"type":"paragraph","text":"..."}
+     4. {"type":"card","title":"...","body":"...","accent":"flame"|"neutral"}
+     5. {"type":"button","label":"...","url":"https://...","variant":"primary"|"secondary"}
+     6. {"type":"embed","title":"...","url":"https://...","description":"..."}
+     7. {"type":"quote","text":"...","author":"..."}
+     8. {"type":"code","language":"bash|typescript|python|...","code":"..."}
+     9. {"type":"list","ordered":false|true,"items":["...","..."]}
+     10. {"type":"image","url":"...","alt":"...","caption":"..."} (only real URLs already present; never invent URLs)
+     11. {"type":"video","url":"...","caption":"..."} (only real URLs already present)
+     12. {"type":"audio","url":"...","title":"...","caption":"..."} (only real URLs already present)
 
-فرمت خروجی الزامی (فقط یک آبجکت JSON معتبر برگردان، بدون توضیح اضافه خارج از JSON):
+MANDATORY OUTPUT FORMAT (return ONLY a single valid JSON object, no prose outside JSON):
 {
-  "reply": "توضیح کوتاه و دقیق فارسی درباره کار انجام‌شده (مثلاً فهرست غلط‌های املایی اصلاح‌شده یا پیشنهادها)",
-  "patch": null یا {
-    "mode": "replace" | "append" | "meta_only",
-    "title": "عنوان پیشنهادی یا اصلاح‌شده (اختیاری)",
-    "slug": "اسلاگ فارسی کوتاه با خط تیره (اختیاری)",
-    "excerpt": "خلاصه ۲ خطی سئوشده یا اصلاح‌شده (اختیاری)",
-    "category": "یکی از دسته‌بندی‌های موجود (اختیاری)",
-    "blocks": [ ... آرایه بلوک‌ها (در حالت replace یا append) ]
+  "reply": "Short, clear summary of the exact change or answer.",
+  "patch": null OR {
+    "mode": "patch_blocks" | "meta_only" | "append" | "replace",
+    "targetLang": "fa" | "en",
+    "title": "(optional - only if changed)",
+    "slug": "(optional - only if changed)",
+    "excerpt": "(optional - only if changed)",
+    "category": "(optional - must match an existing category name)",
+    "blockUpdates": [{"index": 0, "block": { ... }}],
+    "removeBlockIndices": [2],
+    "blocks": [ ... ]
   }
 }
 
-نکته:
-- اگر کاربر فقط «پیشنهاد ویرایش / نقد / بررسی» خواست و نخواست فیلدها عوض شوند، patch را null بگذار و پیشنهادهای دقیق را در reply بنویس.
-- در هر درخواستی که تغییر، اصلاح، تصحیح، زیباسازی یا تولید متن بخواهد، حتماً patch را آماده و قابل اعمال برگردان.`;
+Notes:
+- If the user only asks a question, critique, or brainstorm without asking to change the editor, set "patch": null.
+- Whenever the user requests any edit, correction, addition, deletion, or rewrite, always include a clean, directly applicable "patch".`;
 
 function detectIpVersion(host: string): 0 | 4 | 6 {
   if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) {
@@ -199,25 +209,72 @@ function extractJsonObject(rawText: string): Record<string, unknown> | null {
   return null;
 }
 
-function normalizeAiPatch(raw: unknown): AiPostPatch | null {
+export function normalizeAiPatch(
+  raw: unknown,
+  fallbackTargetLang?: SiteLanguage,
+): AiPostPatch | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const obj = raw as Record<string, unknown>;
-  const mode =
-    obj.mode === 'append' || obj.mode === 'meta_only' || obj.mode === 'replace'
-      ? obj.mode
-      : Array.isArray(obj.blocks)
-        ? 'replace'
-        : 'meta_only';
 
-  const patch: AiPostPatch = { mode };
+  const hasBlockUpdates = Array.isArray(obj.blockUpdates) && obj.blockUpdates.length > 0;
+  const hasRemoveIndices =
+    Array.isArray(obj.removeBlockIndices) && obj.removeBlockIndices.length > 0;
+
+  const mode =
+    obj.mode === 'append' ||
+    obj.mode === 'meta_only' ||
+    obj.mode === 'replace' ||
+    obj.mode === 'patch_blocks'
+      ? obj.mode
+      : hasBlockUpdates || hasRemoveIndices
+        ? 'patch_blocks'
+        : Array.isArray(obj.blocks)
+          ? 'replace'
+          : 'meta_only';
+
+  const targetLang: SiteLanguage | undefined =
+    obj.targetLang === 'en' || obj.targetLang === 'fa' ? obj.targetLang : fallbackTargetLang;
+
+  const patch: AiPostPatch = { mode, ...(targetLang ? { targetLang } : {}) };
   if (typeof obj.title === 'string' && obj.title.trim()) patch.title = obj.title.trim();
   if (typeof obj.slug === 'string' && obj.slug.trim()) patch.slug = obj.slug.trim();
   if (typeof obj.excerpt === 'string' && obj.excerpt.trim()) patch.excerpt = obj.excerpt.trim();
   if (typeof obj.category === 'string' && obj.category.trim()) patch.category = obj.category.trim();
+
   if (Array.isArray(obj.blocks)) {
     const normalized = normalizeBlocks(obj.blocks);
     if (normalized.length > 0) {
       patch.blocks = normalized;
+    }
+  }
+
+  if (Array.isArray(obj.blockUpdates)) {
+    const updates: AiBlockUpdate[] = [];
+    for (const item of obj.blockUpdates) {
+      if (!item || typeof item !== 'object') continue;
+      const rec = item as Record<string, unknown>;
+      const index = typeof rec.index === 'number' ? Math.trunc(rec.index) : -1;
+      if (index < 0) continue;
+      const normalized = normalizeBlocks([rec.block]);
+      if (normalized.length === 1) {
+        updates.push({ index, block: normalized[0] });
+      }
+    }
+    if (updates.length > 0) {
+      patch.blockUpdates = updates;
+    }
+  }
+
+  if (Array.isArray(obj.removeBlockIndices)) {
+    const indices = Array.from(
+      new Set(
+        obj.removeBlockIndices
+          .map((n) => (typeof n === 'number' ? Math.trunc(n) : -1))
+          .filter((n) => n >= 0),
+      ),
+    );
+    if (indices.length > 0) {
+      patch.removeBlockIndices = indices;
     }
   }
 
@@ -226,7 +283,9 @@ function normalizeAiPatch(raw: unknown): AiPostPatch | null {
     !patch.slug &&
     !patch.excerpt &&
     !patch.category &&
-    (!patch.blocks || patch.blocks.length === 0)
+    (!patch.blocks || patch.blocks.length === 0) &&
+    (!patch.blockUpdates || patch.blockUpdates.length === 0) &&
+    (!patch.removeBlockIndices || patch.removeBlockIndices.length === 0)
   ) {
     return null;
   }
@@ -237,64 +296,65 @@ function describeBlockReadable(block: ContentBlock, index: number): string {
   const num = index + 1;
   switch (block.type) {
     case 'h2':
-      return `[بلوک ${num} | تیتر H2]: ${block.text}`;
+      return `[Block #${num} (index ${index}) | H2]: ${block.text}`;
     case 'h3':
-      return `[بلوک ${num} | تیتر H3]: ${block.text}`;
+      return `[Block #${num} (index ${index}) | H3]: ${block.text}`;
     case 'paragraph':
-      return `[بلوک ${num} | پاراگراف]: ${block.text}`;
+      return `[Block #${num} (index ${index}) | Paragraph]: ${block.text}`;
     case 'card':
-      return `[بلوک ${num} | کارت (${block.accent || 'flame'})]: عنوان="${block.title}" | متن="${block.body}"`;
+      return `[Block #${num} (index ${index}) | Card (${block.accent || 'flame'})]: title="${block.title}" | body="${block.body}"`;
     case 'button':
-      return `[بلوک ${num} | دکمه]: برچسب="${block.label}" | لینک="${block.url}"`;
+      return `[Block #${num} (index ${index}) | Button]: label="${block.label}" | url="${block.url}"`;
     case 'embed':
-      return `[بلوک ${num} | کارت لینک]: عنوان="${block.title}" | لینک="${block.url}" | توضیح="${block.description || ''}"`;
+      return `[Block #${num} (index ${index}) | Embed]: title="${block.title}" | url="${block.url}" | desc="${block.description || ''}"`;
     case 'quote':
-      return `[بلوک ${num} | نقل‌قول]: "${block.text}" (گوینده: ${block.author || 'ندارد'})`;
+      return `[Block #${num} (index ${index}) | Quote]: "${block.text}" (author: ${block.author || 'none'})`;
     case 'code':
-      return `[بلوک ${num} | کد (${block.language})]: ${block.code}`;
+      return `[Block #${num} (index ${index}) | Code (${block.language})]: ${block.code}`;
     case 'list':
-      return `[بلوک ${num} | فهرست ${block.ordered ? 'شماره‌دار' : 'نقطه‌ای'}]: ${block.items.join(' | ')}`;
+      return `[Block #${num} (index ${index}) | List (${block.ordered ? 'ordered' : 'bullet'})]: ${block.items.join(' | ')}`;
     case 'image':
-      return `[بلوک ${num} | تصویر]: url="${block.url}" | alt="${block.alt || ''}" | زیرنویس="${block.caption || ''}"`;
+      return `[Block #${num} (index ${index}) | Image]: url="${block.url}" | alt="${block.alt || ''}" | caption="${block.caption || ''}"`;
     case 'video':
-      return `[بلوک ${num} | ویدیو]: url="${block.url}" | زیرنویس="${block.caption || ''}"`;
+      return `[Block #${num} (index ${index}) | Video]: url="${block.url}" | caption="${block.caption || ''}"`;
     case 'audio':
-      return `[بلوک ${num} | صوت]: url="${block.url}" | عنوان="${block.title || ''}" | زیرنویس="${block.caption || ''}"`;
+      return `[Block #${num} (index ${index}) | Audio]: url="${block.url}" | title="${block.title || ''}" | caption="${block.caption || ''}"`;
   }
 }
 
 function buildUserPrompt(input: AiAssistInput): string {
+  const contentLang: SiteLanguage = input.contentLang === 'en' ? 'en' : 'fa';
+  const adminLang: SiteLanguage = input.adminLang === 'en' ? 'en' : 'fa';
+
   const actionHints: Record<AiAssistAction, string> = {
-    chat: 'درخواست مستقیم مدیر (دقیقاً طبق همین درخواست عمل کن و اگر فقط اصلاح بخشی را خواست بقیه را تغییر نده):',
-    write_full:
-      'یک مقاله کامل، ساختاریافته و خواندنی درباره موضوع زیر بنویس (شامل عنوان، اسلاگ، خلاصه، دسته‌بندی مناسب، تیترهای H2/H3، پاراگراف با بولد و هایلایت، حداقل یک کارت نکته، فهرست و نقل‌قول یا کد در صورت مرتبط بودن):',
-    proofread:
-      'فقط غلط‌های املایی، نیم‌فاصله‌ها، علائم نگارشی و اشکالات واضح تایپی موجود در فیلدهای فعلی (عنوان، خلاصه و بلوک‌ها) را اصلاح کن. ساختار، لحن و محتوای نویسنده را بازنویسی نکن. تمام بلوک‌ها را با همان ترتیب و نوع حفظ کن، لیست اصلاحات را در reply بنویس و نسخه تصحیح‌شده را در patch (با mode="replace") برگردان:',
-    polish:
-      'متن و بلوک‌های فعلی را از نظر نگارشی، نیم‌فاصله، روانی، ساختار تیترها، بولد/هایلایت کلیدی و افزودن کارت نکته (در صورت نیاز) زیباسازی و ویراستاری کن و patch با mode="replace" بده:',
-    suggest:
-      'مقاله و فیلدهای فعلی را بررسی کن و فقط پیشنهادهای دقیق و کاربردی برای بهبود تیتر، خلاصه، ساختار، خوانایی و سئو ارائه بده (patch را null بگذار):',
-    fill_meta:
-      'بر اساس بلوک‌های فعلی نوشته، عنوان جذاب، اسلاگ فارسی تمیز، خلاصه ۲ خطی سئوشده و بهترین دسته‌بندی موجود را پیشنهاد بده (patch با mode="meta_only"):',
-    add_summary:
-      'یک کارت جمع‌بندی و یک بخش نکات کلیدی (list یا card) متناسب با نوشته فعلی بساز تا به انتهای مقاله اضافه شود (patch با mode="append"):',
+    chat: 'Direct admin instruction (execute EXACTLY what is requested — no more, no less; use mode="patch_blocks" or "meta_only" when editing specific blocks/fields):',
+    write_full: `Write a complete, well-structured, engaging article in ${contentLang === 'en' ? 'English' : 'Persian'} on the requested topic (title, slug, excerpt, matching category, H2/H3 headings, paragraphs with bold/highlight, at least one insight card, list, and quote/code if relevant):`,
+    proofread: `Proofread ONLY spelling, typos, punctuation, and half-spaces (in Persian) across the current fields and blocks. Do NOT rewrite tone, structure, or add/remove content. Preserve every block type/order and list the fixes in reply:`,
+    polish: `Improve flow, clarity, heading hierarchy, inline bold/highlight formatting, and readability of the current ${contentLang === 'en' ? 'English' : 'Persian'} post without losing any real information or media blocks:`,
+    suggest: `Review the current post and provide concrete, concise editorial & SEO suggestions ONLY (set patch to null):`,
+    fill_meta: `Based on the current blocks, suggest an engaging title, clean URL slug, 2-line SEO excerpt, and best matching category (use mode="meta_only"):`,
+    add_summary: `Create a concise summary card and key takeaways list matching the current post to append at the end (use mode="append"):`,
   };
 
   const action = input.action || 'chat';
   const readableFields = [
-    `عنوان فعلی: ${input.currentPost.title.trim() || '(خالی)'}`,
-    `دسته‌بندی انتخاب‌شده: ${input.currentPost.category.trim() || '(خالی)'}`,
-    `اسلاگ فعلی: ${input.currentPost.slug.trim() || '(خالی)'}`,
-    `خلاصه فعلی: ${input.currentPost.excerpt.trim() || '(خالی)'}`,
-    `تصویر کاور: ${input.currentPost.coverImage?.trim() || '(ندارد)'}`,
-    `دسته‌بندی‌های مجاز سایت: ${input.categories.join('، ') || 'یادگیری'}`,
-    `تعداد بلوک‌ها: ${input.currentPost.blocks.length}`,
+    `targetContentLanguage: ${contentLang} (${contentLang === 'en' ? 'English' : 'Persian'})`,
+    `adminUiLanguage: ${adminLang} (${adminLang === 'en' ? 'English' : 'Persian'})`,
+    `Current Title: ${input.currentPost.title.trim() || '(empty)'}`,
+    `Current Category: ${input.currentPost.category.trim() || '(empty)'}`,
+    `Current Slug: ${input.currentPost.slug.trim() || '(empty)'}`,
+    `Current Excerpt: ${input.currentPost.excerpt.trim() || '(empty)'}`,
+    `Cover Image: ${input.currentPost.coverImage?.trim() || '(none)'}`,
+    `Available Site Categories: ${input.categories.join(', ') || 'یادگیری'}`,
+    `Block Count: ${input.currentPost.blocks.length}`,
     input.currentPost.blocks.length > 0
       ? input.currentPost.blocks.map((b, i) => describeBlockReadable(b, i)).join('\n')
-      : '(هنوز هیچ بلوکی نوشته نشده است)',
+      : '(no blocks written yet)',
   ].join('\n');
 
   const contextPayload = {
+    targetContentLanguage: contentLang,
+    adminUiLanguage: adminLang,
     availableCategories: input.categories,
     currentPost: {
       title: input.currentPost.title,
@@ -302,19 +362,19 @@ function buildUserPrompt(input: AiAssistInput): string {
       excerpt: input.currentPost.excerpt,
       category: input.currentPost.category,
       coverImage: input.currentPost.coverImage || '',
-      blocks: input.currentPost.blocks,
+      blocks: input.currentPost.blocks.map((block, index) => ({ index, ...block })),
     },
   };
 
   const recentHistory = (input.history || [])
-    .slice(-6)
-    .map((m) => `${m.role === 'user' ? 'مدیر' : 'دستیار'}: ${m.text}`)
+    .slice(-8)
+    .map((m) => `${m.role === 'user' ? 'Admin' : 'Assistant'}: ${m.text}`)
     .join('\n');
 
   return [
-    `خلاصه خوانای فیلدهای فعلی ویرایشگر:\n${readableFields}`,
-    `داده کامل ساختاریافته ویرایشگر (JSON):\n${JSON.stringify(contextPayload, null, 2)}`,
-    recentHistory ? `خلاصه گفت‌وگوی قبلی:\n${recentHistory}` : '',
+    `Live Editor Snapshot:\n${readableFields}`,
+    `Structured Editor JSON:\n${JSON.stringify(contextPayload, null, 2)}`,
+    recentHistory ? `Recent Conversation:\n${recentHistory}` : '',
     `${actionHints[action]}\n${input.prompt.trim()}`,
   ]
     .filter(Boolean)
@@ -372,7 +432,7 @@ async function callGeminiProvider(
   const ai = new GoogleGenAI({
     apiKey,
     httpOptions: {
-      headers: { 'User-Agent': 'mbnd-cms/1.0' },
+      headers: { 'User-Agent': 'aistudio-build' },
       ...(baseUrl ? { baseUrl } : {}),
     },
   });
@@ -493,7 +553,6 @@ async function callOpenAiCompatibleProvider(
   try {
     let { res, rawBody } = await executeRequest(jsonMode);
 
-    // Some OpenAI-compatible gateways reject response_format: json_object with HTTP 400 -> auto-retry without it
     if (!res.ok && res.status === 400 && jsonMode) {
       const retry = await executeRequest(false);
       res = retry.res;
@@ -543,6 +602,7 @@ async function callOpenAiCompatibleProvider(
 export async function runAdminAiAssist(input: AiAssistInput): Promise<AiAssistResponse> {
   const cfg = await getAiConfigResolved();
   const userPrompt = buildUserPrompt(input);
+  const contentLang: SiteLanguage = input.contentLang === 'en' ? 'en' : 'fa';
 
   const rawResult =
     cfg.provider === 'openai_compatible'
@@ -562,8 +622,10 @@ export async function runAdminAiAssist(input: AiAssistInput): Promise<AiAssistRe
   const reply =
     typeof parsed.reply === 'string' && parsed.reply.trim()
       ? parsed.reply.trim()
-      : 'تغییرات پیشنهادی آماده شد. می‌توانی با دکمه زیر روی ویرایشگر اعمال کنی.';
-  const patch = normalizeAiPatch(parsed.patch);
+      : input.adminLang === 'en'
+        ? 'Suggested changes are ready. Click Apply below to update the editor.'
+        : 'تغییرات پیشنهادی آماده شد. می‌توانی با دکمه زیر روی ویرایشگر اعمال کنی.';
+  const patch = normalizeAiPatch(parsed.patch, contentLang);
 
   return {
     reply,

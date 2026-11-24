@@ -277,7 +277,7 @@ export function AdminPortal() {
     initialDraft?.blocks || [createEmptyBlock('paragraph')],
   );
   const [postBlocksEn, setPostBlocksEn] = useState<ContentBlock[]>(initialDraft?.blocksEn || []);
-  const [aiDrawerOpen, setAiDrawerOpen] = useState(true);
+  const [aiDrawerOpen, setAiDrawerOpen] = useState(false);
   const [undoSnapshot, setUndoSnapshot] = useState<PostDraftSnapshot | null>(null);
 
   // Category Form & Drag State
@@ -310,6 +310,7 @@ export function AdminPortal() {
 
   // Social Links & Drag State
   const [socials, setSocials] = useState<SocialPlatformLink[]>([]);
+  const [dragSocialReadyIndex, setDragSocialReadyIndex] = useState<number | null>(null);
   const [dragSocialIndex, setDragSocialIndex] = useState<number | null>(null);
   const [dragSocialOverIndex, setDragSocialOverIndex] = useState<number | null>(null);
 
@@ -893,19 +894,68 @@ export function AdminPortal() {
       blocksEn: postBlocksEn,
     });
 
-    if (patch.title) setPostTitle(patch.title);
+    const targetLang: SiteLanguage = patch.targetLang || postLangTab;
+    const isTargetEn = targetLang === 'en';
+
+    if (patch.title) {
+      if (isTargetEn) setPostTitleEn(patch.title);
+      else setPostTitle(patch.title);
+    }
     if (patch.slug) setPostSlug(patch.slug);
-    if (patch.excerpt) setPostExcerpt(patch.excerpt);
+    if (patch.excerpt) {
+      if (isTargetEn) setPostExcerptEn(patch.excerpt);
+      else setPostExcerpt(patch.excerpt);
+    }
     if (patch.category && categories.some((c) => c.name === patch.category)) {
       setPostCategory(patch.category);
     }
-    if (patch.blocks && patch.blocks.length > 0) {
-      if (patch.mode === 'append') {
-        setPostBlocks((prev) => [...prev, ...patch.blocks!]);
-      } else if (patch.mode === 'replace') {
-        setPostBlocks(patch.blocks);
+
+    const applyBlockChanges = (prev: ContentBlock[]): ContentBlock[] => {
+      let next = [...prev];
+      if (patch.mode === 'patch_blocks' || patch.blockUpdates || patch.removeBlockIndices) {
+        if (patch.blockUpdates && patch.blockUpdates.length > 0) {
+          for (const upd of patch.blockUpdates) {
+            if (upd.index >= 0 && upd.index < next.length) {
+              next[upd.index] = { ...upd.block, id: next[upd.index].id };
+            } else if (upd.index >= next.length) {
+              next.push(upd.block);
+            }
+          }
+        }
+        if (patch.removeBlockIndices && patch.removeBlockIndices.length > 0) {
+          const removeSet = new Set(patch.removeBlockIndices);
+          next = next.filter((_, idx) => !removeSet.has(idx));
+        }
+        if (patch.blocks && patch.blocks.length > 0) {
+          next = [...next, ...patch.blocks];
+        }
+        return next.length > 0 ? next : [createEmptyBlock('paragraph')];
+      }
+
+      if (patch.blocks && patch.blocks.length > 0) {
+        if (patch.mode === 'append') {
+          return [...next, ...patch.blocks];
+        }
+        if (patch.mode === 'replace') {
+          return patch.blocks;
+        }
+      }
+      return next;
+    };
+
+    if (
+      patch.mode === 'patch_blocks' ||
+      (patch.blockUpdates && patch.blockUpdates.length > 0) ||
+      (patch.removeBlockIndices && patch.removeBlockIndices.length > 0) ||
+      (patch.blocks && patch.blocks.length > 0)
+    ) {
+      if (isTargetEn) {
+        setPostBlocksEn(applyBlockChanges);
+      } else {
+        setPostBlocks(applyBlockChanges);
       }
     }
+
     flashNotice(
       isEn
         ? 'AI suggestion applied to the editor (you can undo anytime).'
@@ -1858,36 +1908,6 @@ export function AdminPortal() {
                   </div>
                 </div>
 
-                {aiDrawerOpen && (
-                  <div className="mb-6">
-                    <AdminAiAssistant
-                      aiConfig={aiConfig}
-                      adminLang={adminLang}
-                      categories={categories.map((c) => c.name)}
-                      currentPost={{
-                        title: postTitle,
-                        slug: postSlug,
-                        excerpt: postExcerpt,
-                        category: postCategory,
-                        coverImage: postCover,
-                        blocks: postBlocks,
-                      }}
-                      canUndo={Boolean(undoSnapshot)}
-                      onUndo={handleUndoAiPatch}
-                      onApplyPatch={handleApplyAiPatch}
-                      onOpenAiSettings={() => {
-                        setTab('settings');
-                        setTimeout(() => {
-                          document.getElementById('ai-settings-section')?.scrollIntoView({
-                            behavior: 'smooth',
-                          });
-                        }, 100);
-                      }}
-                      adminFetch={adminFetch}
-                    />
-                  </div>
-                )}
-
                 <form onSubmit={handleSavePost} noValidate className="space-y-4">
                   {/* Shared Post Metadata (Category, Slug, Cover) */}
                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
@@ -2019,7 +2039,7 @@ export function AdminPortal() {
                           dir="rtl"
                           value={postTitle}
                           onChange={(e) => setPostTitle(e.target.value)}
-                          placeholder="عنوان نوشته"
+                          placeholder={isEn ? 'Persian article title' : 'عنوان نوشته'}
                           className="w-full rounded-xl border border-[var(--hair-strong)] bg-[var(--ground-deep)] px-3.5 py-2.5 text-sm text-[var(--ink)] placeholder:text-[var(--ink-faint)] focus:border-[var(--flame)] focus:outline-none"
                         />
                       </div>
@@ -2034,7 +2054,11 @@ export function AdminPortal() {
                           dir="rtl"
                           value={postExcerpt}
                           onChange={(e) => setPostExcerpt(e.target.value)}
-                          placeholder="خلاصه کوتاه برای کارت نوشته و سئو..."
+                          placeholder={
+                            isEn
+                              ? 'Short Persian summary for blog cards and SEO'
+                              : 'خلاصه کوتاه برای کارت نوشته و سئو...'
+                          }
                           className="w-full rounded-xl border border-[var(--hair-strong)] bg-[var(--ground-deep)] px-3.5 py-2 text-sm text-[var(--ink)] placeholder:text-[var(--ink-faint)] focus:border-[var(--flame)] focus:outline-none"
                         />
                       </div>
@@ -2151,7 +2175,12 @@ export function AdminPortal() {
                       className="rounded-2xl border border-[var(--hair)] bg-[var(--ground-deep)] p-4"
                     >
                       <div className="flex items-center justify-between gap-2 text-[11px] text-[var(--ink-faint)]">
-                        <span className="font-medium text-[var(--flame)]">{post.category}</span>
+                        <span className="font-medium text-[var(--flame)]">
+                          {isEn
+                            ? categories.find((c) => c.name === post.category)?.nameEn ||
+                              post.category
+                            : post.category}
+                        </span>
                         <div className="flex items-center gap-1.5">
                           {post.titleEn && (
                             <span className="rounded bg-[var(--flame-tint)] px-1.5 py-0.5 font-mono text-[10px] font-bold text-[var(--flame)]">
@@ -2209,6 +2238,47 @@ export function AdminPortal() {
                 </div>
               )}
             </aside>
+
+            {/* Floating Corner AI Writing Assistant */}
+            <AdminAiAssistant
+              open={aiDrawerOpen}
+              onToggleOpen={() => setAiDrawerOpen((prev) => !prev)}
+              aiConfig={aiConfig}
+              adminLang={adminLang}
+              contentLang={postLangTab}
+              categories={categories.map((c) => c.name)}
+              currentPost={
+                postLangTab === 'en'
+                  ? {
+                      title: postTitleEn,
+                      slug: postSlug,
+                      excerpt: postExcerptEn,
+                      category: postCategory,
+                      coverImage: postCover,
+                      blocks: postBlocksEn,
+                    }
+                  : {
+                      title: postTitle,
+                      slug: postSlug,
+                      excerpt: postExcerpt,
+                      category: postCategory,
+                      coverImage: postCover,
+                      blocks: postBlocks,
+                    }
+              }
+              canUndo={Boolean(undoSnapshot)}
+              onUndo={handleUndoAiPatch}
+              onApplyPatch={handleApplyAiPatch}
+              onOpenAiSettings={() => {
+                setTab('settings');
+                setTimeout(() => {
+                  document.getElementById('ai-settings-section')?.scrollIntoView({
+                    behavior: 'smooth',
+                  });
+                }, 100);
+              }}
+              adminFetch={adminFetch}
+            />
           </div>
         )}
 
@@ -2261,9 +2331,10 @@ export function AdminPortal() {
                     <input
                       id="cat-name"
                       type="text"
+                      dir="rtl"
                       value={catName}
                       onChange={(e) => setCatName(e.target.value)}
-                      placeholder="نام دسته"
+                      placeholder={isEn ? 'Persian category name' : 'نام دسته'}
                       className="w-full rounded-xl border border-[var(--hair-strong)] bg-[var(--ground-deep)] px-3.5 py-2.5 text-sm text-[var(--ink)] placeholder:text-[var(--ink-faint)] focus:border-[var(--flame)] focus:outline-none"
                     />
                   </div>
@@ -2289,9 +2360,14 @@ export function AdminPortal() {
                   <textarea
                     id="cat-desc"
                     rows={2}
+                    dir="rtl"
                     value={catDesc}
                     onChange={(e) => setCatDesc(e.target.value)}
-                    placeholder="توضیح نمایش داده‌شده هنگام انتخاب دسته..."
+                    placeholder={
+                      isEn
+                        ? 'Short Persian description for this category'
+                        : 'توضیح نمایش داده‌شده هنگام انتخاب دسته...'
+                    }
                     className="w-full rounded-xl border border-[var(--hair-strong)] bg-[var(--ground-deep)] px-3.5 py-2 text-sm text-[var(--ink)] placeholder:text-[var(--ink-faint)] focus:border-[var(--flame)] focus:outline-none"
                   />
                 </div>
@@ -2510,9 +2586,10 @@ export function AdminPortal() {
                     <input
                       id="proj-title"
                       type="text"
+                      dir="rtl"
                       value={projTitle}
                       onChange={(e) => setProjTitle(e.target.value)}
-                      placeholder="عنوان"
+                      placeholder={isEn ? 'Persian project title' : 'عنوان'}
                       className="w-full rounded-xl border border-[var(--hair-strong)] bg-[var(--ground-deep)] px-3.5 py-2 text-sm text-[var(--ink)] placeholder:text-[var(--ink-faint)] focus:border-[var(--flame)] focus:outline-none"
                     />
                   </div>
@@ -2539,9 +2616,10 @@ export function AdminPortal() {
                     <input
                       id="proj-role"
                       type="text"
+                      dir="rtl"
                       value={projRole}
                       onChange={(e) => setProjRole(e.target.value)}
-                      placeholder="وب‌اپ / ابزار"
+                      placeholder={isEn ? 'Persian role / type' : 'وب‌اپ / ابزار'}
                       className="w-full rounded-xl border border-[var(--hair-strong)] bg-[var(--ground-deep)] px-3.5 py-2 text-sm text-[var(--ink)] placeholder:text-[var(--ink-faint)] focus:border-[var(--flame)] focus:outline-none"
                     />
                   </div>
@@ -2568,9 +2646,10 @@ export function AdminPortal() {
                     <input
                       id="proj-period"
                       type="text"
+                      dir="rtl"
                       value={projPeriod}
                       onChange={(e) => setProjPeriod(e.target.value)}
-                      placeholder="۱۴۰۵"
+                      placeholder={isEn ? 'Persian year / period' : '۱۴۰۵'}
                       className="w-full rounded-xl border border-[var(--hair-strong)] bg-[var(--ground-deep)] px-3.5 py-2 text-sm text-[var(--ink)] placeholder:text-[var(--ink-faint)] focus:border-[var(--flame)] focus:outline-none"
                     />
                   </div>
@@ -2624,9 +2703,10 @@ export function AdminPortal() {
                   <textarea
                     id="proj-summary"
                     rows={2}
+                    dir="rtl"
                     value={projSummary}
                     onChange={(e) => setProjSummary(e.target.value)}
-                    placeholder="شرح کوتاه پروژه..."
+                    placeholder={isEn ? 'Short Persian summary' : 'شرح کوتاه پروژه...'}
                     className="w-full rounded-xl border border-[var(--hair-strong)] bg-[var(--ground-deep)] px-3.5 py-2 text-sm text-[var(--ink)] placeholder:text-[var(--ink-faint)] focus:border-[var(--flame)] focus:outline-none"
                   />
                 </div>
@@ -2850,10 +2930,9 @@ export function AdminPortal() {
                 return (
                   <div
                     key={item.id}
-                    draggable
+                    draggable={dragSocialReadyIndex === idx}
                     onDragStart={(e) => {
-                      const tag = (e.target as HTMLElement)?.tagName;
-                      if (tag === 'INPUT' || tag === 'SELECT') {
+                      if (dragSocialReadyIndex !== idx) {
                         e.preventDefault();
                         return;
                       }
@@ -2872,10 +2951,12 @@ export function AdminPortal() {
                       }
                       setDragSocialIndex(null);
                       setDragSocialOverIndex(null);
+                      setDragSocialReadyIndex(null);
                     }}
                     onDragEnd={() => {
                       setDragSocialIndex(null);
                       setDragSocialOverIndex(null);
+                      setDragSocialReadyIndex(null);
                     }}
                     className={`grid grid-cols-1 items-center gap-2.5 rounded-2xl border bg-[var(--ground-deep)] p-4 transition-all md:grid-cols-12 ${
                       isDropTarget
@@ -2886,12 +2967,18 @@ export function AdminPortal() {
                     }`}
                   >
                     <div className="flex items-center gap-2 md:col-span-2">
-                      <span
+                      <button
+                        type="button"
+                        onPointerDown={() => setDragSocialReadyIndex(idx)}
+                        onMouseDown={() => setDragSocialReadyIndex(idx)}
+                        onPointerUp={() => setDragSocialReadyIndex(null)}
+                        onMouseUp={() => setDragSocialReadyIndex(null)}
                         title={adminDict.dragHint}
+                        aria-label={isEn ? 'Drag to reorder link' : 'جابه‌جایی لینک'}
                         className="inline-flex cursor-grab rounded-lg p-1 text-[var(--ink-faint)] hover:bg-[var(--surface)] hover:text-[var(--ink)] active:cursor-grabbing"
                       >
                         <GripVertical className="h-4 w-4" />
-                      </span>
+                      </button>
                       <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-[var(--flame-tint)] text-[var(--flame)]">
                         <SocialIcon iconKey={item.iconKey} className="h-4 w-4" />
                       </span>
@@ -3206,7 +3293,11 @@ export function AdminPortal() {
                           )
                         }
                         placeholder={
-                          settingsLangTab === 'en' ? '© 2026 Mohammad Bagher' : '© ۱۴۰۵ Mohammad Bagher'
+                          settingsLangTab === 'en'
+                            ? '© 2026 Mohammad Bagher'
+                            : isEn
+                              ? 'Persian footer copyright text...'
+                              : '© ۱۴۰۵ Mohammad Bagher'
                         }
                         className="w-full rounded-xl border border-[var(--hair-strong)] bg-[var(--ground-deep)] px-3.5 py-2 text-sm text-[var(--ink)] focus:border-[var(--flame)] focus:outline-none"
                       />
@@ -3756,7 +3847,13 @@ export function AdminPortal() {
 
                           <input
                             type="text"
-                            dir={field.type === 'tel' || field.type === 'email' || field.type === 'url' ? 'ltr' : 'rtl'}
+                            dir={
+                              field.type === 'tel' || field.type === 'email' || field.type === 'url'
+                                ? 'ltr'
+                                : isEn
+                                  ? 'ltr'
+                                  : 'rtl'
+                            }
                             value={field.value}
                             onChange={(e) => updateVCardExtraField(idx, { value: e.target.value })}
                             placeholder={

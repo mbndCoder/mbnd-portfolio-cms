@@ -1,9 +1,14 @@
 import { lazy, Suspense, useEffect, useState } from 'react';
-import { BrowserRouter, Route, Routes } from 'react-router-dom';
+import { BrowserRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { ErrorBoundary } from './components/ErrorBoundary.tsx';
 import { Footer } from './components/Footer.tsx';
 import { Navbar } from './components/Navbar.tsx';
-import { DEFAULT_NAV_ITEMS, getUiDict } from './lib/i18n.ts';
+import {
+  DEFAULT_NAV_ITEMS,
+  getLocalizedSettingsText,
+  getUiDict,
+  localizePost,
+} from './lib/i18n.ts';
 import { applyThemeToDocument, resolveEffectiveTheme } from './lib/theme.ts';
 import { HomePage } from './pages/HomePage.tsx';
 import { NotFoundPage } from './pages/NotFoundPage.tsx';
@@ -36,9 +41,10 @@ const LANG_STORAGE_KEY = 'mbnd_lang_pref';
 
 const FALLBACK_SITE_DATA: PublicSiteData = {
   settings: {
-    siteTitle: 'Mohammad Bagher | محمدباقر',
+    siteTitle:
+      'محمدباقر نوری (Mohammad Bagher Nouri) | طراحی سایت، ساخت اپ و اتوماسیون هوش مصنوعی — mbnd.ir',
     siteDescription:
-      'اینجا از خودم و چیزایی که یاد می‌گیرم می‌نویسم. طراحی اپ و سایت با هوش مصنوعی، استقرار ایجنت‌ها و اتوماسیون، و تعمیر و بهینه‌سازی نرم‌افزاری سیستم‌ها.',
+      'وب‌سایت رسمی محمدباقر نوری (Mohammad Bagher Nouri / Noori — mbnd.ir): طراحی سایت و ساخت اپلیکیشن با هوش مصنوعی، استقرار ایجنت‌های هوش مصنوعی و اتوماسیون، تعمیر و بهینه‌سازی نرم‌افزاری سیستم‌ها.',
     brandName: 'Mohammad Bagher',
     logoImage: '/logo.webp',
     faviconImage: '/favicon.png',
@@ -213,6 +219,69 @@ function readStoredLang(defaultLang: SiteLanguage, allowToggle: boolean): SiteLa
   return safeDefault;
 }
 
+function updateMetaTag(selector: string, content: string): void {
+  const el = document.querySelector<HTMLMetaElement>(selector);
+  if (el && content) {
+    el.setAttribute('content', content);
+  }
+}
+
+function RouteSeoSync({ data, lang }: { data: PublicSiteData; lang: SiteLanguage }) {
+  const { pathname } = useLocation();
+
+  useEffect(() => {
+    const s = data.settings;
+    const loc = getLocalizedSettingsText(s, lang);
+    const brand =
+      lang === 'en'
+        ? `${s.brandName || 'Mohammad Bagher'} Nouri | mbnd.ir`
+        : `${s.brandName || 'Mohammad Bagher'} | محمدباقر نوری`;
+
+    let title =
+      lang === 'en'
+        ? 'Mohammad Bagher Nouri (mbnd.ir) | AI Web & App Design, Agents & Automation'
+        : s.siteTitle || brand;
+    let desc =
+      lang === 'en'
+        ? loc.heroSubtitle || s.siteDescription
+        : s.siteDescription || loc.heroSubtitle;
+
+    if (pathname === '/blog') {
+      title = `${loc.blogPageTitle} | ${brand}`;
+      desc = loc.blogPageSubtitle || desc;
+    } else if (pathname.startsWith('/blog/') && pathname.length > 6) {
+      const slug = decodeURIComponent(pathname.slice('/blog/'.length));
+      const matched = data.posts.find((p) => p.slug === slug);
+      if (matched) {
+        const lp = localizePost(matched, lang);
+        title = `${lp.title} | ${brand}`;
+        desc = lp.excerpt || desc;
+      }
+    } else if (pathname === '/projects') {
+      title = `${loc.projectsSectionTitle} | ${brand}`;
+      desc = loc.projectsPageSubtitle || desc;
+    } else if (pathname === '/about') {
+      title = `${loc.aboutTitle} | ${brand}`;
+      desc = loc.aboutBio || desc;
+    }
+
+    document.title = title;
+    updateMetaTag('meta[name="description"]', desc);
+    updateMetaTag('meta[property="og:title"]', title);
+    updateMetaTag('meta[property="og:description"]', desc);
+    updateMetaTag('meta[name="twitter:title"]', title);
+    updateMetaTag('meta[name="twitter:description"]', desc);
+
+    const canonical = document.querySelector<HTMLLinkElement>('link[rel="canonical"]');
+    if (canonical && typeof window !== 'undefined') {
+      const origin = window.location.origin.replace(/^https?:\/\/www\.mbnd\.ir$/i, 'https://mbnd.ir');
+      canonical.setAttribute('href', `${origin}${pathname === '/' ? '/' : pathname}`);
+    }
+  }, [pathname, data, lang]);
+
+  return null;
+}
+
 export default function App() {
   const isSecretAdminPortal = Boolean(
     typeof window !== 'undefined' && window.__ADMIN_PORTAL_ACTIVE__,
@@ -326,12 +395,20 @@ export default function App() {
   };
 
   if (isSecretAdminPortal) {
+    let adminLoadingText = 'در حال بارگذاری پنل مدیریت...';
+    try {
+      if (localStorage.getItem('mbnd_admin_lang') === 'en') {
+        adminLoadingText = 'Loading Admin Portal...';
+      }
+    } catch {
+      // ignore storage errors
+    }
     return (
       <ErrorBoundary>
         <Suspense
           fallback={
             <div className="flex min-h-screen items-center justify-center bg-[var(--ground-deep)] text-sm text-[var(--ink-muted)]">
-              در حال بارگذاری پنل مدیریت...
+              {adminLoadingText}
             </div>
           }
         >
@@ -346,6 +423,7 @@ export default function App() {
   return (
     <ErrorBoundary>
       <BrowserRouter>
+        <RouteSeoSync data={siteData} lang={lang} />
         <div
           className="flex min-h-screen flex-col bg-[var(--ground-deep)] text-[var(--ink)]"
           data-loaded={loaded}

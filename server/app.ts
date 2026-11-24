@@ -179,16 +179,71 @@ function isHttpsRequest(c: AppContext): boolean {
   }
 }
 
+function normalizeCanonicalHost(urlStr: string): string {
+  try {
+    const parsed = new URL(urlStr);
+    if (parsed.hostname.toLowerCase() === 'www.mbnd.ir') {
+      parsed.protocol = 'https:';
+      parsed.hostname = 'mbnd.ir';
+      parsed.port = '';
+    }
+    return parsed.origin;
+  } catch {
+    return urlStr.replace(/\/+$/, '');
+  }
+}
+
 function getBaseOrigin(c: AppContext): string {
   const envUrl = getEnvVar('APP_URL', c.env).trim();
   if (envUrl && !isPlaceholderEnv(envUrl)) {
-    return envUrl.replace(/\/+$/, '');
+    return normalizeCanonicalHost(envUrl);
   }
   const proto = isHttpsRequest(c) ? 'https' : 'http';
   const forwardedHost = c.req.header('x-forwarded-host')?.split(',')[0]?.trim();
   const host = forwardedHost || c.req.header('host') || new URL(c.req.url).host || 'localhost:3000';
-  return `${proto}://${host}`;
+  return normalizeCanonicalHost(`${proto}://${host}`);
 }
+
+const IDENTITY_ALTERNATE_NAMES = [
+  'محمدباقر نوری',
+  'محمد باقر نوری',
+  'محمدباقر',
+  'محمد باقر',
+  'Mohammad Bagher',
+  'Mohammad Bagher Nouri',
+  'Mohammad Bagher Noori',
+  'Nouri',
+  'Noori',
+  'mbnd',
+  'mbnd.ir',
+  'www.mbnd.ir',
+];
+
+const CORE_SEO_KEYWORDS = [
+  'محمدباقر نوری',
+  'محمد باقر نوری',
+  'محمدباقر',
+  'محمد باقر',
+  'mbnd',
+  'mbnd.ir',
+  'www.mbnd.ir',
+  'Mohammad Bagher',
+  'Mohammad Bagher Nouri',
+  'Mohammad Bagher Noori',
+  'طراحی سایت',
+  'ساخت اپ',
+  'طراحی اپ و سایت با هوش مصنوعی',
+  'اتوماسیون',
+  'ایجنت هوش مصنوعی',
+  'هوش مصنوعی',
+  'بهینه‌سازی سیستم',
+  'تعمیر نرم‌افزاری سیستم',
+  'AI Web Development',
+  'AI App Development',
+  'AI Agents',
+  'Workflow Automation',
+  'Software Optimization',
+].join(', ');
 
 function setSessionCookie(c: AppContext, token: string): void {
   const secure = isHttpsRequest(c);
@@ -476,12 +531,15 @@ app.get('/favicon.ico', async (c) => {
 app.get('/robots.txt', (c) => {
   const origin = getBaseOrigin(c);
   const body = [
-    '# Search Engines & AI Search Crawlers',
+    '# Search Engines & AI Search Crawlers (mbnd.ir — Mohammad Bagher Nouri)',
     'User-agent: *',
     'Allow: /',
     'Disallow: /api/',
     '',
     'User-agent: Googlebot',
+    'Allow: /',
+    '',
+    'User-agent: Bingbot',
     'Allow: /',
     '',
     'User-agent: OAI-SearchBot',
@@ -490,14 +548,28 @@ app.get('/robots.txt', (c) => {
     'User-agent: ChatGPT-User',
     'Allow: /',
     '',
+    'User-agent: GPTBot',
+    'Allow: /',
+    '',
     'User-agent: PerplexityBot',
     'Allow: /',
     '',
     'User-agent: ClaudeBot',
     'Allow: /',
     '',
+    'User-agent: anthropic-ai',
+    'Allow: /',
+    '',
+    'User-agent: Google-Extended',
+    'Allow: /',
+    '',
+    'User-agent: Applebot-Extended',
+    'Allow: /',
+    '',
     `Sitemap: ${origin}/sitemap.xml`,
+    `# RSS Feed: ${origin}/rss.xml`,
     `# LLMs context: ${origin}/llms.txt`,
+    `# LLMs full index: ${origin}/llms-full.txt`,
   ].join('\n');
   c.header('Cache-Control', 'public, max-age=3600');
   return c.text(body, 200);
@@ -513,34 +585,45 @@ app.get('/llms.txt', async (c) => {
   const socials = parseSocialLinks(s.socialLinksJson).filter((l) => l.enabled !== false);
 
   const lines = [
-    `# ${s.brandName || 'Mohammad Bagher'} (${s.vcardFullName || 'محمدباقر نوری'})`,
+    `# ${s.brandName || 'Mohammad Bagher'} (${s.vcardFullName || 'محمدباقر نوری'}) — mbnd.ir`,
     '',
     `> ${s.siteDescription}`,
     '',
-    `- Website: ${origin}/`,
-    `- Focus: ${s.aboutFocusText}`,
+    '## Identity & Aliases',
+    '- Persian Name: محمدباقر نوری (محمد باقر نوری / محمدباقر / محمد باقر)',
+    '- English Name: Mohammad Bagher Nouri (Mohammad Bagher Noori / Mohammad Bagher / Nouri / Noori)',
+    '- Brand & Domain: mbnd, mbnd.ir, www.mbnd.ir',
+    `- Canonical Website: ${origin}/`,
+    `- Email: ${s.email || 'mbnd1224@gmail.com'}`,
+    `- RSS Feed: ${origin}/rss.xml`,
     `- Full Markdown Index: ${origin}/llms-full.txt`,
     `- Sitemap: ${origin}/sitemap.xml`,
     '',
+    '## Core Services & Expertise',
+    '- طراحی سایت و ساخت اپلیکیشن با هوش مصنوعی (AI-Powered Website & App Design & Development)',
+    '- استقرار ایجنت‌های هوش مصنوعی و اتوماسیون هوشمند فرآیندها (AI Agents Deployment & Workflow Automation)',
+    '- بهینه‌سازی، عیب‌یابی و تعمیر نرم‌افزاری سیستم‌ها (Software Troubleshooting & System Optimization)',
+    `- Focus: ${s.aboutFocusText}${s.aboutFocusTextEn ? ` | ${s.aboutFocusTextEn}` : ''}`,
+    '',
     '## Key Pages',
-    `- [Home](${origin}/): ${s.heroTitle}`,
+    `- [Home](${origin}/): ${s.heroTitle}${s.heroTitleEn ? ` / ${s.heroTitleEn}` : ''}`,
     `- [Blog](${origin}/blog): ${s.blogPageSubtitle || s.blogSectionTitle}`,
     `- [Projects](${origin}/projects): ${s.projectsPageSubtitle || s.projectsSectionTitle}`,
     `- [About & Contact](${origin}/about): ${s.aboutTitle}`,
     '',
     '## Direct Channels',
-    ...socials.map((l) => `- ${l.label}: ${l.url}${l.handle ? ` (${l.handle})` : ''}`),
+    ...socials.map((l) => `- ${l.label}${l.labelEn ? ` (${l.labelEn})` : ''}: ${l.url}${l.handle ? ` (${l.handle})` : ''}`),
     '',
     '## Projects',
     ...projects.map(
       (p) =>
-        `- [${p.title}](${p.url.startsWith('http') ? p.url : `${origin}${p.url}`}) (${p.role}): ${p.summary}`,
+        `- [${p.title}${p.titleEn ? ` / ${p.titleEn}` : ''}](${p.url.startsWith('http') ? p.url : `${origin}${p.url}`}) (${p.role}): ${p.summary}${p.summaryEn ? ` — ${p.summaryEn}` : ''}`,
     ),
     '',
     '## Published Articles',
     ...publishedPosts.map(
       (post) =>
-        `- [${post.title}](${origin}/blog/${encodeURIComponent(post.slug)}) [${post.category}]: ${post.excerpt}`,
+        `- [${post.title}${post.titleEn ? ` / ${post.titleEn}` : ''}](${origin}/blog/${encodeURIComponent(post.slug)}) [${post.category}]: ${post.excerpt}${post.excerptEn ? ` | ${post.excerptEn}` : ''}`,
     ),
   ];
 
@@ -557,29 +640,33 @@ app.get('/llms-full.txt', async (c) => {
   ]);
 
   const sections: string[] = [
-    `# ${s.brandName || 'Mohammad Bagher'} — Complete Site Content`,
+    `# ${s.brandName || 'Mohammad Bagher'} (${s.vcardFullName || 'محمدباقر نوری'}) — Complete Site Content`,
     '',
     `Canonical URL: ${origin}/`,
-    `Author: ${s.vcardFullName || 'محمدباقر نوری'} (${s.brandName})`,
+    `Aliases: ${IDENTITY_ALTERNATE_NAMES.join(', ')}`,
+    `Author: ${s.vcardFullName || 'محمدباقر نوری'} (${s.brandName || 'Mohammad Bagher Nouri'})`,
+    `Services: طراحی سایت و ساخت اپ با هوش مصنوعی، استقرار ایجنت‌ها و اتوماسیون، تعمیر و بهینه‌سازی نرم‌افزاری سیستم‌ها | AI-assisted web & app development, AI agents, workflow automation, software optimization`,
     '',
     '## About',
     s.aboutBio,
+    s.aboutBioEn ? `\n${s.aboutBioEn}` : '',
     '',
-    `Focus Areas: ${s.aboutFocusText}`,
+    `Focus Areas: ${s.aboutFocusText}${s.aboutFocusTextEn ? ` | ${s.aboutFocusTextEn}` : ''}`,
     '',
     '## Projects',
     ...projects.map(
       (p) =>
-        `### ${p.title}\n- Role: ${p.role}\n- Period: ${p.period}\n- Stack: ${p.stack.join(', ')}\n- URL: ${
+        `### ${p.title}${p.titleEn ? ` (${p.titleEn})` : ''}\n- Role: ${p.role}${p.roleEn ? ` / ${p.roleEn}` : ''}\n- Period: ${p.period}\n- Stack: ${p.stack.join(', ')}\n- URL: ${
           p.url.startsWith('http') ? p.url : `${origin}${p.url}`
-        }\n\n${p.summary}`,
+        }\n\n${p.summary}${p.summaryEn ? `\n\n${p.summaryEn}` : ''}`,
     ),
     '',
     '## Blog Articles',
     ...publishedPosts.map((post) => {
       const bodyMd = blocksToPlainMarkdown(post.blocks);
+      const bodyEnMd = post.blocksEn?.length ? blocksToPlainMarkdown(post.blocksEn) : '';
       return [
-        `### ${post.title}`,
+        `### ${post.title}${post.titleEn ? ` (${post.titleEn})` : ''}`,
         `- URL: ${origin}/blog/${encodeURIComponent(post.slug)}`,
         `- Category: ${post.category}`,
         `- Published: ${post.createdAt}`,
@@ -587,14 +674,73 @@ app.get('/llms-full.txt', async (c) => {
         `- Reading Time: ${post.readingMinutes} min`,
         '',
         post.excerpt,
+        post.excerptEn ? `\n${post.excerptEn}` : '',
         '',
         bodyMd,
-      ].join('\n');
+        bodyEnMd ? `\n\n#### English Version\n${bodyEnMd}` : '',
+      ]
+        .filter((line) => line !== '')
+        .join('\n');
     }),
   ];
 
   c.header('Cache-Control', 'no-cache');
   return c.text(`${sections.join('\n\n')}\n`, 200);
+});
+
+app.get('/rss.xml', async (c) => {
+  const origin = getBaseOrigin(c);
+  const [s, publishedPosts] = await Promise.all([getSettings(), listPosts(false)]);
+  const channelTitle = s.siteTitle || 'محمدباقر نوری (Mohammad Bagher Nouri) | mbnd.ir';
+  const channelDescription = s.siteDescription;
+  const latestDate = publishedPosts[0]?.updatedAt || publishedPosts[0]?.createdAt || new Date().toISOString();
+  const parsedBuildDate = new Date(latestDate);
+  const lastBuildDate = Number.isNaN(parsedBuildDate.getTime())
+    ? new Date().toUTCString()
+    : parsedBuildDate.toUTCString();
+
+  const itemsXml = publishedPosts
+    .map((post) => {
+      const link = `${origin}/blog/${encodeURIComponent(post.slug)}`;
+      const parsedDate = new Date(post.createdAt);
+      const pubDate = Number.isNaN(parsedDate.getTime())
+        ? new Date().toUTCString()
+        : parsedDate.toUTCString();
+      const desc = post.excerptEn ? `${post.excerpt} — ${post.excerptEn}` : post.excerpt;
+      return [
+        '    <item>',
+        `      <title>${escapeXml(post.title)}</title>`,
+        `      <link>${escapeXml(link)}</link>`,
+        `      <guid isPermaLink="true">${escapeXml(link)}</guid>`,
+        `      <pubDate>${escapeXml(pubDate)}</pubDate>`,
+        `      <category>${escapeXml(post.category)}</category>`,
+        `      <description>${escapeXml(desc)}</description>`,
+        '    </item>',
+      ].join('\n');
+    })
+    .join('\n');
+
+  const xml = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">',
+    '  <channel>',
+    `    <title>${escapeXml(channelTitle)}</title>`,
+    `    <link>${escapeXml(`${origin}/`)}</link>`,
+    `    <atom:link href="${escapeXml(`${origin}/rss.xml`)}" rel="self" type="application/rss+xml" />`,
+    `    <description>${escapeXml(channelDescription)}</description>`,
+    '    <language>fa-IR</language>',
+    `    <lastBuildDate>${escapeXml(lastBuildDate)}</lastBuildDate>`,
+    itemsXml,
+    '  </channel>',
+    '</rss>',
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  return c.body(xml, 200, {
+    'Content-Type': 'application/rss+xml; charset=utf-8',
+    'Cache-Control': 'no-cache',
+  });
 });
 
 app.get('/sitemap.xml', async (c) => {
@@ -1289,10 +1435,14 @@ app.post('/api/admin/ai/assist', requireAdmin, async (c) => {
     }
 
     const rawPost = (body.currentPost ?? {}) as Record<string, unknown>;
+    const contentLang = body.contentLang === 'en' ? 'en' : 'fa';
+    const adminLang = body.adminLang === 'en' ? 'en' : 'fa';
     const allCats = await listCategories();
     const result = await runAdminAiAssist({
-      prompt: prompt || 'بر اساس متن و فیلدهای فعلی اقدام کن.',
+      prompt: prompt || (contentLang === 'en' ? 'Act on the current post fields.' : 'بر اساس متن و فیلدهای فعلی اقدام کن.'),
       action,
+      contentLang,
+      adminLang,
       history: Array.isArray(body.history)
         ? (body.history as Array<{ role: 'user' | 'assistant'; text: string }>)
         : [],
@@ -1392,10 +1542,17 @@ app.get('*', async (c) => {
   const siteSettings = await getSettings();
   let pageTitle = siteSettings.siteTitle;
   let pageDescription = siteSettings.siteDescription;
+  let pageKeywords = CORE_SEO_KEYWORDS;
   const defaultPoster = siteSettings.heroPosterDesktop?.trim() || '/poster.webp';
   let ogImage = defaultPoster.startsWith('http') ? defaultPoster : `${origin}${defaultPoster}`;
   let ogType = 'website';
   let httpStatus: 200 | 404 = 200;
+  let articleMeta: {
+    publishedTime: string;
+    modifiedTime: string;
+    section: string;
+    author: string;
+  } | null = null;
 
   const [publicCategories, publicPosts, publicProjects] = isSecretAdminRoute
     ? [[], [], []]
@@ -1405,23 +1562,96 @@ app.get('*', async (c) => {
     .filter((s) => s.enabled !== false && s.url.startsWith('http'))
     .map((s) => s.url);
 
+  const personAlternateNames = Array.from(
+    new Set(
+      [
+        siteSettings.brandName,
+        siteSettings.vcardFullName,
+        ...IDENTITY_ALTERNATE_NAMES,
+      ].filter((v): v is string => Boolean(v && v.trim())),
+    ),
+  );
+
   const personNode = {
     '@type': 'Person',
     '@id': `${origin}/#person`,
     name: siteSettings.vcardFullName || 'محمدباقر نوری',
-    alternateName: siteSettings.brandName,
+    alternateName: personAlternateNames,
     url: origin,
     image: `${origin}/logo.png`,
-    jobTitle: siteSettings.vcardTitle,
+    email: siteSettings.email ? `mailto:${siteSettings.email}` : undefined,
+    jobTitle:
+      siteSettings.vcardTitle ||
+      'طراحی سایت و ساخت اپ با هوش مصنوعی، اتوماسیون و بهینه‌سازی سیستم‌ها | AI Web & App Developer',
     description: siteSettings.aboutBio,
+    knowsLanguage: ['fa-IR', 'en-US'],
     knowsAbout: [
+      'طراحی سایت با هوش مصنوعی',
+      'ساخت اپلیکیشن وب و موبایل',
+      'استقرار ایجنت‌های هوش مصنوعی',
+      'اتوماسیون هوشمند فرآیندها',
+      'تعمیر و بهینه‌سازی نرم‌افزاری سیستم‌ها',
       'AI-Assisted Web & App Development',
-      'AI Agents & Automation',
-      'Software Troubleshooting & Optimization',
-      'Serverless Web Architecture',
+      'AI Agents & Workflow Automation',
+      'Software Troubleshooting & System Optimization',
+      'Full-Stack TypeScript & Cloudflare Workers Architecture',
     ],
+    hasOccupation: {
+      '@type': 'Occupation',
+      name: 'AI Web & App Developer, Automation & Software Optimization Specialist',
+      skills:
+        'Website Design, App Development, AI Agents, Automation, Software Optimization, React, TypeScript, Cloudflare Workers',
+    },
+    makesOffer: {
+      '@type': 'OfferCatalog',
+      name: 'خدمات طراحی سایت، ساخت اپ، هوش مصنوعی و بهینه‌سازی سیستم — Mohammad Bagher Nouri (mbnd.ir)',
+      itemListElement: [
+        {
+          '@type': 'Offer',
+          itemOffered: {
+            '@type': 'Service',
+            name: 'طراحی سایت و ساخت اپلیکیشن با هوش مصنوعی (AI Website & App Development)',
+            description:
+              'طراحی و پیاده‌سازی وب‌سایت، پورتفولیو، پنل مدیریت و اپلیکیشن‌های مدرن و سریع با کمک هوش مصنوعی.',
+          },
+        },
+        {
+          '@type': 'Offer',
+          itemOffered: {
+            '@type': 'Service',
+            name: 'استقرار ایجنت‌های هوش مصنوعی و اتوماسیون (AI Agents & Workflow Automation)',
+            description:
+              'طراحی و راه‌اندازی ایجنت‌های هوشمند و اتوماسیون کارهای تکراری برای کسب‌وکارها و تیم‌ها.',
+          },
+        },
+        {
+          '@type': 'Offer',
+          itemOffered: {
+            '@type': 'Service',
+            name: 'تعمیر و بهینه‌سازی نرم‌افزاری سیستم‌ها (Software Troubleshooting & Optimization)',
+            description:
+              'عیب‌یابی نرم‌افزاری، رفع کندی و بهینه‌سازی عملکرد سیستم‌ها و وب‌اپلیکیشن‌ها.',
+          },
+        },
+      ],
+    },
     sameAs: sameAsLinks,
   };
+
+  const websiteAlternateNames = Array.from(
+    new Set(
+      [
+        siteSettings.siteTitle,
+        'mbnd',
+        'mbnd.ir',
+        'www.mbnd.ir',
+        'محمدباقر نوری',
+        'محمد باقر نوری',
+        'Mohammad Bagher Nouri',
+        'Mohammad Bagher Noori',
+      ].filter((v): v is string => Boolean(v && v.trim())),
+    ),
+  );
 
   let jsonLd: Record<string, unknown> = {
     '@context': 'https://schema.org',
@@ -1429,12 +1659,20 @@ app.get('*', async (c) => {
       {
         '@type': 'WebSite',
         '@id': `${origin}/#website`,
-        name: siteSettings.brandName,
-        alternateName: siteSettings.siteTitle,
+        name: siteSettings.brandName || 'Mohammad Bagher',
+        alternateName: websiteAlternateNames,
         url: origin,
         description: siteSettings.siteDescription,
-        inLanguage: 'fa-IR',
+        inLanguage: ['fa-IR', 'en-US'],
         publisher: { '@id': `${origin}/#person` },
+        potentialAction: {
+          '@type': 'SearchAction',
+          target: {
+            '@type': 'EntryPoint',
+            urlTemplate: `${origin}/blog?q={search_term_string}`,
+          },
+          'query-input': 'required name=search_term_string',
+        },
       },
       personNode,
     ],
@@ -1450,17 +1688,17 @@ app.get('*', async (c) => {
     if (reqPath === '/') {
       // Home uses default WebSite + Person JSON-LD
     } else if (reqPath === '/blog') {
-      pageTitle = `${siteSettings.blogSectionTitle || 'نوشته‌ها و تجربه‌ها'} | ${siteSettings.brandName}`;
+      pageTitle = `${siteSettings.blogSectionTitle || 'نوشته‌ها و تجربه‌ها'} | ${siteSettings.brandName} (mbnd.ir)`;
       pageDescription = siteSettings.blogPageSubtitle || siteSettings.siteDescription;
       jsonLd = {
         '@context': 'https://schema.org',
         '@graph': [
           {
             '@type': 'Blog',
-            name: siteSettings.blogSectionTitle || 'وبلاگ',
+            name: siteSettings.blogSectionTitle || 'وبلاگ محمدباقر نوری',
             description: pageDescription,
             url: canonicalUrl,
-            inLanguage: 'fa-IR',
+            inLanguage: ['fa-IR', 'en-US'],
             author: personNode,
           },
           {
@@ -1478,7 +1716,14 @@ app.get('*', async (c) => {
       if (post) {
         pageTitle = `${post.title} | ${siteSettings.brandName}`;
         pageDescription = post.excerpt;
+        pageKeywords = `${post.title}, ${post.category}, ${CORE_SEO_KEYWORDS}`;
         ogType = 'article';
+        articleMeta = {
+          publishedTime: post.createdAt,
+          modifiedTime: post.updatedAt || post.createdAt,
+          section: post.category,
+          author: siteSettings.vcardFullName || 'محمدباقر نوری',
+        };
         if (post.coverImage) {
           ogImage = post.coverImage.startsWith('http')
             ? post.coverImage
@@ -1492,13 +1737,14 @@ app.get('*', async (c) => {
             {
               '@type': 'BlogPosting',
               headline: post.title,
+              alternativeHeadline: post.titleEn || undefined,
               description: post.excerpt,
               articleSection: post.category,
               datePublished: post.createdAt,
               dateModified: post.updatedAt || post.createdAt,
               timeRequired: `PT${Math.max(1, post.readingMinutes || 1)}M`,
               wordCount,
-              inLanguage: 'fa-IR',
+              inLanguage: post.blocksEn?.length ? ['fa-IR', 'en-US'] : 'fa-IR',
               image: ogImage,
               author: personNode,
               publisher: personNode,
@@ -1519,7 +1765,7 @@ app.get('*', async (c) => {
         pageTitle = `نوشته پیدا نشد | ${siteSettings.brandName}`;
       }
     } else if (reqPath === '/projects') {
-      pageTitle = `${siteSettings.projectsSectionTitle || 'پروژه‌ها'} | ${siteSettings.brandName}`;
+      pageTitle = `${siteSettings.projectsSectionTitle || 'پروژه‌ها'} | ${siteSettings.brandName} (mbnd.ir)`;
       pageDescription = siteSettings.projectsPageSubtitle || siteSettings.siteDescription;
       jsonLd = {
         '@context': 'https://schema.org',
@@ -1529,7 +1775,7 @@ app.get('*', async (c) => {
             name: pageTitle,
             description: pageDescription,
             url: canonicalUrl,
-            inLanguage: 'fa-IR',
+            inLanguage: ['fa-IR', 'en-US'],
             mainEntity: {
               '@type': 'ItemList',
               itemListElement: publicProjects.map((proj, idx) => ({
@@ -1538,6 +1784,7 @@ app.get('*', async (c) => {
                 item: {
                   '@type': 'CreativeWork',
                   name: proj.title,
+                  alternateName: proj.titleEn || undefined,
                   description: proj.summary,
                   url: proj.url.startsWith('http') ? proj.url : `${origin}${proj.url}`,
                   creator: personNode,
@@ -1555,7 +1802,7 @@ app.get('*', async (c) => {
         ],
       };
     } else if (reqPath === '/about') {
-      pageTitle = `${siteSettings.aboutTitle || 'درباره من و ارتباط'} | ${siteSettings.brandName}`;
+      pageTitle = `${siteSettings.aboutTitle || 'درباره من و ارتباط'} | ${siteSettings.brandName} (mbnd.ir)`;
       pageDescription = siteSettings.aboutBio || siteSettings.siteDescription;
       jsonLd = {
         '@context': 'https://schema.org',
@@ -1565,7 +1812,7 @@ app.get('*', async (c) => {
             name: pageTitle,
             description: pageDescription,
             url: canonicalUrl,
-            inLanguage: 'fa-IR',
+            inLanguage: ['fa-IR', 'en-US'],
             mainEntity: personNode,
           },
           {
@@ -1584,6 +1831,7 @@ app.get('*', async (c) => {
   }
 
   const faviconHref = siteSettings.faviconImage?.trim() || '/favicon.png';
+  const hasKeywordsMeta = /<meta\s+name="keywords"\s+content="[^"]*"\s*\/>/s.test(html);
   html = html
     .replace(
       /<link\s+rel="icon"[^>]*\/>/s,
@@ -1593,6 +1841,10 @@ app.get('*', async (c) => {
     .replace(
       /<meta\s+name="description"\s+content="[^"]*"\s*\/>/s,
       `<meta name="description" content="${escapeHtmlAttr(pageDescription)}" />`,
+    )
+    .replace(
+      /<meta\s+name="keywords"\s+content="[^"]*"\s*\/>/s,
+      `<meta name="keywords" content="${escapeHtmlAttr(pageKeywords)}" />`,
     )
     .replace(
       /<meta\s+property="og:title"\s+content="[^"]*"\s*\/>/s,
@@ -1624,17 +1876,43 @@ app.get('*', async (c) => {
     : '';
 
   const safeJsonLd = JSON.stringify(jsonLd).replace(/</g, '\\u003c');
+  const isIndexablePublic = httpStatus === 200 && !isSecretAdminRoute;
 
   const injectedHeadTags = [
-    httpStatus === 200 && !isSecretAdminRoute
+    !hasKeywordsMeta && isIndexablePublic
+      ? `<meta name="keywords" content="${escapeHtmlAttr(pageKeywords)}" />`
+      : '',
+    isIndexablePublic
       ? `<link rel="canonical" href="${escapeHtmlAttr(canonicalUrl)}" />`
+      : '',
+    isIndexablePublic
+      ? `<link rel="alternate" hreflang="fa-IR" href="${escapeHtmlAttr(canonicalUrl)}" />`
+      : '',
+    isIndexablePublic
+      ? `<link rel="alternate" hreflang="en" href="${escapeHtmlAttr(canonicalUrl)}" />`
+      : '',
+    isIndexablePublic
+      ? `<link rel="alternate" hreflang="x-default" href="${escapeHtmlAttr(canonicalUrl)}" />`
       : '',
     `<meta property="og:url" content="${escapeHtmlAttr(canonicalUrl)}" />`,
     `<meta property="og:image" content="${escapeHtmlAttr(ogImage)}" />`,
+    `<meta property="og:image:alt" content="${escapeHtmlAttr(pageTitle)}" />`,
+    articleMeta
+      ? `<meta property="article:published_time" content="${escapeHtmlAttr(articleMeta.publishedTime)}" />`
+      : '',
+    articleMeta
+      ? `<meta property="article:modified_time" content="${escapeHtmlAttr(articleMeta.modifiedTime)}" />`
+      : '',
+    articleMeta
+      ? `<meta property="article:section" content="${escapeHtmlAttr(articleMeta.section)}" />`
+      : '',
+    articleMeta
+      ? `<meta property="article:author" content="${escapeHtmlAttr(articleMeta.author)}" />`
+      : '',
     `<meta name="twitter:title" content="${escapeHtmlAttr(pageTitle)}" />`,
     `<meta name="twitter:description" content="${escapeHtmlAttr(pageDescription)}" />`,
     `<meta name="twitter:image" content="${escapeHtmlAttr(ogImage)}" />`,
-    isSecretAdminRoute || httpStatus === 404
+    !isIndexablePublic
       ? ''
       : `<script type="application/ld+json">${safeJsonLd}</script>`,
     isSecretAdminRoute

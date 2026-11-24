@@ -34,6 +34,7 @@ export function parseClientSocialLinks(
     fallback.push({
       id: 'telegram',
       label: 'تلگرام',
+      labelEn: 'Telegram',
       handle: settings.telegramHandle || '@mbnd1224',
       url: settings.telegramUrl,
       iconKey: 'telegram',
@@ -44,6 +45,7 @@ export function parseClientSocialLinks(
     fallback.push({
       id: 'email',
       label: 'ایمیل',
+      labelEn: 'Email',
       handle: settings.email,
       url: `mailto:${settings.email}`,
       iconKey: 'email',

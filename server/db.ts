@@ -353,9 +353,9 @@ export const DEFAULT_NAV_ITEMS_JSON = JSON.stringify([
 ]);
 
 export const DEFAULT_SETTINGS: SiteSettings = {
-  siteTitle: 'Mohammad Bagher | محمدباقر',
+  siteTitle: 'محمدباقر نوری (Mohammad Bagher Nouri) | طراحی سایت، ساخت اپ و اتوماسیون هوش مصنوعی — mbnd.ir',
   siteDescription:
-    'اینجا از خودم و چیزایی که یاد می‌گیرم می‌نویسم. طراحی اپ و سایت با هوش مصنوعی، استقرار ایجنت‌ها و اتوماسیون، و تعمیر و بهینه‌سازی نرم‌افزاری سیستم‌ها.',
+    'وب‌سایت رسمی محمدباقر نوری (Mohammad Bagher Nouri / Noori — mbnd.ir): طراحی سایت و ساخت اپلیکیشن با هوش مصنوعی، استقرار ایجنت‌های هوش مصنوعی و اتوماسیون، تعمیر و بهینه‌سازی نرم‌افزاری سیستم‌ها.',
   brandName: 'Mohammad Bagher',
   logoImage: '/logo.webp',
   faviconImage: '/favicon.png',

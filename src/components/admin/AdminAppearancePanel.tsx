@@ -168,6 +168,7 @@ export function AdminAppearancePanel({
   translatingSiteCopy = false,
 }: AdminAppearancePanelProps) {
   const isEn = adminLang === 'en';
+  const [dragReadyIdx, setDragReadyIdx] = useState<number | null>(null);
   const [dragIdx, setDragIdx] = useState<number | null>(null);
 
   const navItems: NavItem[] = parseNavItems(settings.navItemsJson);
@@ -572,19 +573,39 @@ export function AdminAppearancePanel({
           {navItems.map((item, idx) => (
             <div
               key={item.id}
-              draggable
-              onDragStart={() => setDragIdx(idx)}
+              draggable={dragReadyIdx === idx}
+              onDragStart={(e) => {
+                if (dragReadyIdx !== idx) {
+                  e.preventDefault();
+                  return;
+                }
+                setDragIdx(idx);
+              }}
               onDragOver={(e) => e.preventDefault()}
               onDrop={() => {
                 if (dragIdx === null || dragIdx === idx) return;
                 setNavItems(reorderArray(navItems, dragIdx, idx));
                 setDragIdx(null);
+                setDragReadyIdx(null);
               }}
-              onDragEnd={() => setDragIdx(null)}
+              onDragEnd={() => {
+                setDragIdx(null);
+                setDragReadyIdx(null);
+              }}
               className="grid grid-cols-1 items-center gap-2.5 rounded-2xl border border-[var(--hair)] bg-[var(--ground-deep)] p-3 md:grid-cols-12"
             >
               <div className="flex items-center gap-2 md:col-span-1">
-                <GripVertical className="h-4 w-4 cursor-grab text-[var(--ink-faint)]" />
+                <button
+                  type="button"
+                  onPointerDown={() => setDragReadyIdx(idx)}
+                  onMouseDown={() => setDragReadyIdx(idx)}
+                  onPointerUp={() => setDragReadyIdx(null)}
+                  onMouseUp={() => setDragReadyIdx(null)}
+                  aria-label={isEn ? 'Drag to reorder tab' : 'جابه‌جایی تب'}
+                  className="inline-flex cursor-grab rounded p-0.5 text-[var(--ink-faint)] hover:text-[var(--ink)] active:cursor-grabbing"
+                >
+                  <GripVertical className="h-4 w-4" />
+                </button>
                 <input
                   type="checkbox"
                   checked={item.enabled !== false}
@@ -595,9 +616,10 @@ export function AdminAppearancePanel({
               </div>
               <input
                 type="text"
+                dir="rtl"
                 value={item.labelFa}
                 onChange={(e) => updateNavItem(idx, { labelFa: e.target.value })}
-                placeholder={isEn ? 'Persian Label (e.g. وبلاگ)' : 'عنوان فارسی (مثلاً وبلاگ)'}
+                placeholder={isEn ? 'Persian Label (FA)' : 'عنوان فارسی (مثلاً وبلاگ)'}
                 className="rounded-xl border border-[var(--hair)] bg-[var(--ground)] px-3 py-2 text-xs text-[var(--ink)] focus:border-[var(--flame)] focus:outline-none md:col-span-3"
               />
               <input
