@@ -5,6 +5,7 @@ import {
   authenticateAdminUser,
   bumpAdminTokenVersion,
   changeAdminCredentials,
+  clearSystemLogs,
   configureDb,
   createMessage,
   deleteCategory,
@@ -12,17 +13,20 @@ import {
   deletePost,
   deleteProject,
   ensureDbInitialized,
+  exportFullBackup,
   getAdminUserByUsername,
   getAiConfigPublic,
   getOrCreateSessionSecret,
   getPostBySlug,
   getSettings,
   hasAnyAdminUser,
+  importFullBackup,
   isPlaceholderEnv,
   listCategories,
   listMessages,
   listPosts,
   listProjects,
+  listSystemLogs,
   markMessageRead,
   parseSocialLinks,
   parseVCardExtraFields,
@@ -34,6 +38,7 @@ import {
   upsertCategory,
   upsertPost,
   upsertProject,
+  writeSystemLog,
 } from './db.ts';
 import {
   createSessionToken,
@@ -54,8 +59,12 @@ import {
   UploadValidationError,
   uploadMediaToCloudinary,
 } from './uploads.ts';
+import { BackupValidationError } from './backup.ts';
+import { inferLogSourceFromPath } from './logs.ts';
 import { getEnvVar, type RuntimeEnv } from './env.ts';
 import { normalizeBlocks } from '../src/lib/blocks.ts';
+import { normalizeDigitsToAscii } from '../src/lib/slug.ts';
+import type { SiteLanguage, SiteSettings } from '../src/types/cms.ts';
 
 type AdminUserContext = {
   username: string;
@@ -74,9 +83,11 @@ type AppContext = Context<AppEnv>;
 
 const COOKIE_NAME = 'mbnd_session';
 const MAX_JSON_BODY_BYTES = 5 * 1024 * 1024;
+const MAX_BACKUP_BODY_BYTES = 10 * 1024 * 1024;
 
 const loginAttempts = new Map<string, { count: number; resetAt: number }>();
 const contactAttempts = new Map<string, { count: number; resetAt: number }>();
+const clientErrorAttempts = new Map<string, { count: number; resetAt: number }>();
 const vcardAvatarCache = new Map<string, { cachedAt: number; base64: string }>();
 
 function resolveAdminRoute(env?: RuntimeEnv): string {
@@ -118,6 +129,34 @@ function checkContactRateLimit(ip: string): boolean {
   if (entry.count >= 10) return false;
   entry.count += 1;
   return true;
+}
+
+function checkClientErrorRateLimit(ip: string): boolean {
+  const now = Date.now();
+  const entry = clientErrorAttempts.get(ip);
+  if (!entry || entry.resetAt < now) {
+    clientErrorAttempts.set(ip, { count: 1, resetAt: now + 15 * 60 * 1000 });
+    return true;
+  }
+  if (entry.count >= 25) return false;
+  entry.count += 1;
+  return true;
+}
+
+function normalizePhoneForVCard(raw: string): string {
+  return normalizeDigitsToAscii(raw)
+    .replace(/[^\d+\-()#*.\s]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function buildSafeVCardFilename(rawName: string): string {
+  const ascii = normalizeDigitsToAscii(rawName)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48);
+  return `${ascii || 'contact'}.vcf`;
 }
 
 function escapeHtmlAttr(str: string): string {
@@ -182,10 +221,10 @@ function isHttpsRequest(c: AppContext): boolean {
 function normalizeCanonicalHost(urlStr: string): string {
   try {
     const parsed = new URL(urlStr);
-    if (parsed.hostname.toLowerCase() === 'www.mbnd.ir') {
-      parsed.protocol = 'https:';
-      parsed.hostname = 'mbnd.ir';
-      parsed.port = '';
+    const hostLower = parsed.hostname.toLowerCase();
+    if (hostLower.startsWith('www.') && hostLower.length > 4) {
+      parsed.hostname = hostLower.slice(4);
+      if (parsed.protocol === 'https:' && parsed.port === '443') parsed.port = '';
     }
     return parsed.origin;
   } catch {
@@ -204,46 +243,54 @@ function getBaseOrigin(c: AppContext): string {
   return normalizeCanonicalHost(`${proto}://${host}`);
 }
 
-const IDENTITY_ALTERNATE_NAMES = [
-  'محمدباقر نوری',
-  'محمد باقر نوری',
-  'محمدباقر',
-  'محمد باقر',
-  'Mohammad Bagher',
-  'Mohammad Bagher Nouri',
-  'Mohammad Bagher Noori',
-  'Nouri',
-  'Noori',
-  'mbnd',
-  'mbnd.ir',
-  'www.mbnd.ir',
-];
+function buildDynamicSeoProfile(s: SiteSettings, origin: string): {
+  brandName: string;
+  authorName: string;
+  hostname: string;
+  alternateNames: string[];
+  keywords: string;
+  knowsAbout: string[];
+} {
+  let hostname = '';
+  try {
+    hostname = new URL(origin).hostname.replace(/^www\./i, '');
+  } catch {
+    hostname = '';
+  }
 
-const CORE_SEO_KEYWORDS = [
-  'محمدباقر نوری',
-  'محمد باقر نوری',
-  'محمدباقر',
-  'محمد باقر',
-  'mbnd',
-  'mbnd.ir',
-  'www.mbnd.ir',
-  'Mohammad Bagher',
-  'Mohammad Bagher Nouri',
-  'Mohammad Bagher Noori',
-  'طراحی سایت',
-  'ساخت اپ',
-  'طراحی اپ و سایت با هوش مصنوعی',
-  'اتوماسیون',
-  'ایجنت هوش مصنوعی',
-  'هوش مصنوعی',
-  'بهینه‌سازی سیستم',
-  'تعمیر نرم‌افزاری سیستم',
-  'AI Web Development',
-  'AI App Development',
-  'AI Agents',
-  'Workflow Automation',
-  'Software Optimization',
-].join(', ');
+  const brandName = (s.brandName || s.siteTitle || 'Portfolio').trim();
+  const authorName = (s.vcardFullName || s.brandName || 'Site Owner').trim();
+  const titleParts = [
+    s.brandName,
+    s.vcardFullName,
+    s.siteTitle,
+    s.heroTitleEn,
+    hostname && hostname !== 'localhost' && hostname !== '127.0.0.1' ? hostname : '',
+    hostname && hostname !== 'localhost' && hostname !== '127.0.0.1' ? `www.${hostname}` : '',
+  ]
+    .map((v) => (v || '').trim())
+    .filter(Boolean);
+
+  const alternateNames = Array.from(new Set(titleParts));
+
+  const focusTokens = [s.aboutFocusText, s.aboutFocusTextEn, s.vcardTitle]
+    .filter((v): v is string => Boolean(v && v.trim()))
+    .flatMap((v) => v.split(/[،,·|/•\n]+/))
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 2 && t.length <= 70);
+
+  const knowsAbout = Array.from(new Set(focusTokens)).slice(0, 12);
+  const keywordList = Array.from(new Set([...alternateNames, ...knowsAbout])).slice(0, 22);
+
+  return {
+    brandName,
+    authorName,
+    hostname,
+    alternateNames,
+    keywords: keywordList.join(', '),
+    knowsAbout,
+  };
+}
 
 function setSessionCookie(c: AppContext, token: string): void {
   const secure = isHttpsRequest(c);
@@ -329,13 +376,16 @@ function passesCsrfCheck(c: AppContext): boolean {
   return false;
 }
 
-async function readJsonBody(c: AppContext): Promise<Record<string, unknown>> {
+async function readJsonBody(
+  c: AppContext,
+  maxBytes = MAX_JSON_BODY_BYTES,
+): Promise<Record<string, unknown>> {
   const contentLength = Number(c.req.header('content-length') || '0');
-  if (Number.isFinite(contentLength) && contentLength > MAX_JSON_BODY_BYTES) {
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
     throw new HTTPException(413, { message: 'حجم داده‌های ارسالی بیش از حد مجاز است.' });
   }
   const raw = await c.req.text();
-  if (raw.length > MAX_JSON_BODY_BYTES) {
+  if (raw.length > maxBytes) {
     throw new HTTPException(413, { message: 'حجم داده‌های ارسالی بیش از حد مجاز است.' });
   }
   if (!raw.trim()) return {};
@@ -512,6 +562,62 @@ app.use('/api/admin/*', async (c, next) => {
   c.header('Pragma', 'no-cache');
 });
 
+// Automatic API error, warning, and admin-mutation logging
+app.use('/api/*', async (c, next) => {
+  const reqPath = c.req.path;
+  const method = c.req.method.toUpperCase();
+  const startedAt = Date.now();
+  await next();
+
+  // Never log log-inspection requests to avoid self-referential noise
+  if (reqPath === '/api/admin/logs' || reqPath === '/api/public/client-error') {
+    return;
+  }
+
+  const status = c.res.status;
+  const elapsedMs = Date.now() - startedAt;
+  const source = inferLogSourceFromPath(reqPath);
+
+  if (status >= 400) {
+    let errorMsg = `HTTP ${status} on ${method} ${reqPath}`;
+    try {
+      const ct = c.res.headers.get('content-type') || '';
+      if (ct.includes('application/json')) {
+        const cloned = await c.res.clone().json().catch(() => null);
+        if (cloned && typeof cloned === 'object' && 'error' in cloned && typeof cloned.error === 'string') {
+          errorMsg = cloned.error;
+        }
+      }
+    } catch {
+      // ignore clone errors
+    }
+    await writeSystemLog({
+      level: status >= 500 ? 'error' : 'warn',
+      source,
+      method,
+      path: reqPath,
+      status,
+      message: errorMsg,
+      details: `${method} ${reqPath} -> ${status} (${elapsedMs}ms)`,
+    });
+  } else if (
+    reqPath.startsWith('/api/admin/') &&
+    method !== 'GET' &&
+    method !== 'HEAD' &&
+    method !== 'OPTIONS'
+  ) {
+    await writeSystemLog({
+      level: 'info',
+      source,
+      method,
+      path: reqPath,
+      status,
+      message: `${method} ${reqPath} succeeded`,
+      details: `Completed in ${elapsedMs}ms`,
+    });
+  }
+});
+
 app.get('/favicon.ico', async (c) => {
   const fav = await fetchStaticAsset(c, '/favicon.png');
   if (fav) {
@@ -531,7 +637,7 @@ app.get('/favicon.ico', async (c) => {
 app.get('/robots.txt', (c) => {
   const origin = getBaseOrigin(c);
   const body = [
-    '# Search Engines & AI Search Crawlers (mbnd.ir — Mohammad Bagher Nouri)',
+    '# Search Engines & AI Search Crawlers',
     'User-agent: *',
     'Allow: /',
     'Disallow: /api/',
@@ -582,27 +688,26 @@ app.get('/llms.txt', async (c) => {
     listPosts(false),
     listProjects(),
   ]);
+  const seo = buildDynamicSeoProfile(s, origin);
   const socials = parseSocialLinks(s.socialLinksJson).filter((l) => l.enabled !== false);
 
   const lines = [
-    `# ${s.brandName || 'Mohammad Bagher'} (${s.vcardFullName || 'محمدباقر نوری'}) — mbnd.ir`,
+    `# ${seo.brandName}${seo.authorName && seo.authorName !== seo.brandName ? ` (${seo.authorName})` : ''}${seo.hostname ? ` — ${seo.hostname}` : ''}`,
     '',
     `> ${s.siteDescription}`,
     '',
-    '## Identity & Aliases',
-    '- Persian Name: محمدباقر نوری (محمد باقر نوری / محمدباقر / محمد باقر)',
-    '- English Name: Mohammad Bagher Nouri (Mohammad Bagher Noori / Mohammad Bagher / Nouri / Noori)',
-    '- Brand & Domain: mbnd, mbnd.ir, www.mbnd.ir',
+    '## Identity & Discovery',
+    `- Brand / Site: ${seo.brandName}`,
+    seo.authorName ? `- Author: ${seo.authorName}` : '',
+    seo.alternateNames.length > 0 ? `- Names & Aliases: ${seo.alternateNames.join(', ')}` : '',
     `- Canonical Website: ${origin}/`,
-    `- Email: ${s.email || 'mbnd1224@gmail.com'}`,
+    s.email ? `- Email: ${s.email}` : '',
     `- RSS Feed: ${origin}/rss.xml`,
     `- Full Markdown Index: ${origin}/llms-full.txt`,
     `- Sitemap: ${origin}/sitemap.xml`,
     '',
-    '## Core Services & Expertise',
-    '- طراحی سایت و ساخت اپلیکیشن با هوش مصنوعی (AI-Powered Website & App Design & Development)',
-    '- استقرار ایجنت‌های هوش مصنوعی و اتوماسیون هوشمند فرآیندها (AI Agents Deployment & Workflow Automation)',
-    '- بهینه‌سازی، عیب‌یابی و تعمیر نرم‌افزاری سیستم‌ها (Software Troubleshooting & System Optimization)',
+    '## Focus & Expertise',
+    s.vcardTitle ? `- Role: ${s.vcardTitle}` : '',
     `- Focus: ${s.aboutFocusText}${s.aboutFocusTextEn ? ` | ${s.aboutFocusTextEn}` : ''}`,
     '',
     '## Key Pages',
@@ -625,7 +730,7 @@ app.get('/llms.txt', async (c) => {
       (post) =>
         `- [${post.title}${post.titleEn ? ` / ${post.titleEn}` : ''}](${origin}/blog/${encodeURIComponent(post.slug)}) [${post.category}]: ${post.excerpt}${post.excerptEn ? ` | ${post.excerptEn}` : ''}`,
     ),
-  ];
+  ].filter((line) => line !== undefined);
 
   c.header('Cache-Control', 'no-cache');
   return c.text(`${lines.join('\n')}\n`, 200);
@@ -638,14 +743,15 @@ app.get('/llms-full.txt', async (c) => {
     listPosts(false),
     listProjects(),
   ]);
+  const seo = buildDynamicSeoProfile(s, origin);
 
   const sections: string[] = [
-    `# ${s.brandName || 'Mohammad Bagher'} (${s.vcardFullName || 'محمدباقر نوری'}) — Complete Site Content`,
+    `# ${seo.brandName}${seo.authorName && seo.authorName !== seo.brandName ? ` (${seo.authorName})` : ''} — Complete Site Content`,
     '',
     `Canonical URL: ${origin}/`,
-    `Aliases: ${IDENTITY_ALTERNATE_NAMES.join(', ')}`,
-    `Author: ${s.vcardFullName || 'محمدباقر نوری'} (${s.brandName || 'Mohammad Bagher Nouri'})`,
-    `Services: طراحی سایت و ساخت اپ با هوش مصنوعی، استقرار ایجنت‌ها و اتوماسیون، تعمیر و بهینه‌سازی نرم‌افزاری سیستم‌ها | AI-assisted web & app development, AI agents, workflow automation, software optimization`,
+    seo.alternateNames.length ? `Aliases: ${seo.alternateNames.join(', ')}` : '',
+    `Author: ${seo.authorName} (${seo.brandName})`,
+    s.vcardTitle ? `Role: ${s.vcardTitle}` : '',
     '',
     '## About',
     s.aboutBio,
@@ -682,7 +788,7 @@ app.get('/llms-full.txt', async (c) => {
         .filter((line) => line !== '')
         .join('\n');
     }),
-  ];
+  ].filter((section) => section !== '');
 
   c.header('Cache-Control', 'no-cache');
   return c.text(`${sections.join('\n\n')}\n`, 200);
@@ -691,7 +797,7 @@ app.get('/llms-full.txt', async (c) => {
 app.get('/rss.xml', async (c) => {
   const origin = getBaseOrigin(c);
   const [s, publishedPosts] = await Promise.all([getSettings(), listPosts(false)]);
-  const channelTitle = s.siteTitle || 'محمدباقر نوری (Mohammad Bagher Nouri) | mbnd.ir';
+  const channelTitle = s.siteTitle || s.brandName || 'Blog RSS Feed';
   const channelDescription = s.siteDescription;
   const latestDate = publishedPosts[0]?.updatedAt || publishedPosts[0]?.createdAt || new Date().toISOString();
   const parsedBuildDate = new Date(latestDate);
@@ -728,7 +834,7 @@ app.get('/rss.xml', async (c) => {
     `    <link>${escapeXml(`${origin}/`)}</link>`,
     `    <atom:link href="${escapeXml(`${origin}/rss.xml`)}" rel="self" type="application/rss+xml" />`,
     `    <description>${escapeXml(channelDescription)}</description>`,
-    '    <language>fa-IR</language>',
+    `    <language>${s.defaultLanguage === 'en' ? 'en-US' : 'fa-IR'}</language>`,
     `    <lastBuildDate>${escapeXml(lastBuildDate)}</lastBuildDate>`,
     itemsXml,
     '  </channel>',
@@ -836,13 +942,13 @@ app.get('/api/save-contact', async (c) => {
   }
 
   const origin = getBaseOrigin(c);
-  const fullName = escapeVCardField(s.vcardFullName || 'محمدباقر نوری');
-  const org = escapeVCardField(s.vcardOrg || s.brandName || 'Mohammad Bagher');
-  const title = escapeVCardField(
-    s.vcardTitle || 'طراحی اپ و سایت با هوش مصنوعی · اتوماسیون و تعمیر نرم‌افزاری سیستم‌ها',
-  );
-  const email = escapeVCardField(s.email || 'mbnd1224@gmail.com');
-  const phone = s.vcardPhone?.trim() ? escapeVCardField(s.vcardPhone.trim()) : '';
+  const fullNameRaw = (s.vcardFullName || s.brandName || 'Contact').trim();
+  const fullName = escapeVCardField(fullNameRaw);
+  const org = s.vcardOrg?.trim() ? escapeVCardField(s.vcardOrg.trim()) : '';
+  const title = s.vcardTitle?.trim() ? escapeVCardField(s.vcardTitle.trim()) : '';
+  const email = s.email?.trim() ? escapeVCardField(s.email.trim()) : '';
+  const normalizedPhone = s.vcardPhone?.trim() ? normalizePhoneForVCard(s.vcardPhone) : '';
+  const phone = normalizedPhone ? escapeVCardField(normalizedPhone) : '';
   const website = s.vcardWebsite?.trim() || origin;
 
   const socials = parseSocialLinks(s.socialLinksJson).filter((l) => l.enabled !== false);
@@ -853,20 +959,53 @@ app.get('/api/save-contact', async (c) => {
   const extraFields = parseVCardExtraFields(s.vcardExtraFieldsJson || '[]');
   const extraFieldLines: string[] = [];
   const extraNotes: string[] = [];
+  let itemIndex = 1;
 
   for (const field of extraFields) {
-    const safeVal = escapeVCardField(field.value);
-    const safeLabel = field.label ? escapeVCardField(field.label) : '';
+    const rawVal = field.value.trim();
+    if (!rawVal) continue;
+    const safeLabel = field.label ? escapeVCardField(field.label.trim()) : '';
+
     if (field.type === 'tel') {
-      extraFieldLines.push(`TEL;TYPE=CELL,VOICE:${safeVal}`);
+      const normalizedExtraPhone = normalizePhoneForVCard(rawVal);
+      if (!normalizedExtraPhone) continue;
+      const safePhone = escapeVCardField(normalizedExtraPhone);
+      if (safeLabel) {
+        extraFieldLines.push(`item${itemIndex}.TEL;TYPE=CELL,VOICE:${safePhone}`);
+        extraFieldLines.push(`item${itemIndex}.X-ABLabel;CHARSET=UTF-8:${safeLabel}`);
+        itemIndex += 1;
+      } else {
+        extraFieldLines.push(`TEL;TYPE=CELL,VOICE:${safePhone}`);
+      }
     } else if (field.type === 'email') {
-      extraFieldLines.push(`EMAIL;TYPE=INTERNET:${safeVal}`);
+      const safeEmail = escapeVCardField(rawVal);
+      if (safeLabel) {
+        extraFieldLines.push(`item${itemIndex}.EMAIL;TYPE=INTERNET:${safeEmail}`);
+        extraFieldLines.push(`item${itemIndex}.X-ABLabel;CHARSET=UTF-8:${safeLabel}`);
+        itemIndex += 1;
+      } else {
+        extraFieldLines.push(`EMAIL;TYPE=INTERNET:${safeEmail}`);
+      }
     } else if (field.type === 'url') {
-      extraFieldLines.push(safeLabel ? `URL;TYPE=${safeLabel}:${safeVal}` : `URL:${safeVal}`);
+      const safeUrl = escapeVCardField(rawVal);
+      if (safeLabel) {
+        extraFieldLines.push(`item${itemIndex}.URL:${safeUrl}`);
+        extraFieldLines.push(`item${itemIndex}.X-ABLabel;CHARSET=UTF-8:${safeLabel}`);
+        itemIndex += 1;
+      } else {
+        extraFieldLines.push(`URL:${safeUrl}`);
+      }
     } else if (field.type === 'address') {
-      extraFieldLines.push(`ADR;TYPE=HOME;CHARSET=UTF-8:;;${safeVal};;;;`);
+      const safeAddr = escapeVCardField(rawVal);
+      if (safeLabel) {
+        extraFieldLines.push(`item${itemIndex}.ADR;CHARSET=UTF-8:;;${safeAddr};;;;`);
+        extraFieldLines.push(`item${itemIndex}.X-ABLabel;CHARSET=UTF-8:${safeLabel}`);
+        itemIndex += 1;
+      } else {
+        extraFieldLines.push(`ADR;TYPE=HOME;CHARSET=UTF-8:;;${safeAddr};;;;`);
+      }
     } else if (field.type === 'note') {
-      extraNotes.push(field.label ? `${field.label}: ${field.value}` : field.value);
+      extraNotes.push(field.label ? `${field.label.trim()}: ${rawVal}` : rawVal);
     }
   }
 
@@ -899,11 +1038,36 @@ app.get('/api/save-contact', async (c) => {
 
   const vcardBody = `${lines.join('\r\n')}\r\n`;
   const disposition = c.req.query('download') === '1' ? 'attachment' : 'inline';
+  const filename = buildSafeVCardFilename(s.brandName || s.vcardOrg || 'contact');
   return c.body(vcardBody, 200, {
     'Content-Type': 'text/vcard; charset=utf-8',
-    'Content-Disposition': `${disposition}; filename="mohammad-bagher.vcf"`,
+    'Content-Disposition': `${disposition}; filename="${filename}"`,
     'Cache-Control': 'no-cache',
   });
+});
+
+app.post('/api/public/client-error', async (c) => {
+  const ip = extractClientIp(c.req.raw.headers, 'unknown');
+  if (!checkClientErrorRateLimit(ip)) {
+    return c.json({ ok: false }, 429);
+  }
+  const body = await readJsonBody(c, 32 * 1024);
+  const message = typeof body.message === 'string' ? body.message.trim() : '';
+  if (!message) {
+    return c.json({ ok: false }, 400);
+  }
+  const path = typeof body.path === 'string' ? body.path.trim() : '/';
+  const stack = typeof body.stack === 'string' ? body.stack.trim() : '';
+  await writeSystemLog({
+    level: 'error',
+    source: 'client',
+    method: 'CLIENT',
+    path: path.slice(0, 200),
+    status: 0,
+    message: message.slice(0, 400),
+    details: stack.slice(0, 2500),
+  });
+  return c.json({ ok: true }, 201);
 });
 
 app.post('/api/public/contact', async (c) => {
@@ -1359,6 +1523,7 @@ app.get('/api/admin/ai/config', requireAdmin, async (c) => {
 
 app.put('/api/admin/ai/config', requireAdmin, async (c) => {
   const body = await readJsonBody(c);
+  const adminLang: SiteLanguage = body.adminLang === 'en' ? 'en' : 'fa';
   const provider =
     body.provider === 'openai_compatible' || body.provider === 'gemini'
       ? body.provider
@@ -1367,11 +1532,16 @@ app.put('/api/admin/ai/config', requireAdmin, async (c) => {
   let validatedBaseUrl = rawBaseUrl;
   if (rawBaseUrl) {
     try {
-      validatedBaseUrl = validateBaseUrl(rawBaseUrl);
+      validatedBaseUrl = validateBaseUrl(rawBaseUrl, adminLang);
     } catch (err) {
       return c.json(
         {
-          error: err instanceof Error ? err.message : 'آدرس ارائه‌دهنده (Base URL) معتبر نیست.',
+          error:
+            err instanceof Error
+              ? err.message
+              : adminLang === 'en'
+                ? 'Provider Base URL is invalid.'
+                : 'آدرس ارائه‌دهنده (Base URL) معتبر نیست.',
         },
         400,
       );
@@ -1389,8 +1559,9 @@ app.put('/api/admin/ai/config', requireAdmin, async (c) => {
 });
 
 app.post('/api/admin/ai/test', requireAdmin, async (c) => {
+  const body = await readJsonBody(c);
+  const adminLang: SiteLanguage = body.adminLang === 'en' ? 'en' : 'fa';
   try {
-    const body = await readJsonBody(c);
     const providerOverride: 'openai_compatible' | 'gemini' | undefined =
       body.provider === 'openai_compatible'
         ? 'openai_compatible'
@@ -1402,6 +1573,7 @@ app.post('/api/admin/ai/test', requireAdmin, async (c) => {
       model: typeof body.model === 'string' ? body.model : undefined,
       baseUrl: typeof body.baseUrl === 'string' ? body.baseUrl : undefined,
       apiKey: typeof body.apiKey === 'string' ? body.apiKey : undefined,
+      adminLang,
     };
     const result = await testAdminAiConnection(override);
     return c.json(result);
@@ -1409,7 +1581,12 @@ app.post('/api/admin/ai/test', requireAdmin, async (c) => {
     if (err instanceof HTTPException) throw err;
     return c.json(
       {
-        error: err instanceof Error ? err.message : 'اتصال به ارائه‌دهنده هوش مصنوعی برقرار نشد.',
+        error:
+          err instanceof Error
+            ? err.message
+            : adminLang === 'en'
+              ? 'Could not connect to the AI provider.'
+              : 'اتصال به ارائه‌دهنده هوش مصنوعی برقرار نشد.',
       },
       400,
     );
@@ -1417,8 +1594,9 @@ app.post('/api/admin/ai/test', requireAdmin, async (c) => {
 });
 
 app.post('/api/admin/ai/assist', requireAdmin, async (c) => {
+  const body = await readJsonBody(c);
+  const adminLang: SiteLanguage = body.adminLang === 'en' ? 'en' : 'fa';
   try {
-    const body = await readJsonBody(c);
     const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
     const action =
       body.action === 'write_full' ||
@@ -1431,15 +1609,26 @@ app.post('/api/admin/ai/assist', requireAdmin, async (c) => {
         : 'chat';
 
     if (!prompt && action === 'chat') {
-      return c.json({ error: 'لطفاً درخواستت را برای دستیار بنویس.' }, 400);
+      return c.json(
+        {
+          error:
+            adminLang === 'en'
+              ? 'Please enter a prompt for the AI assistant.'
+              : 'لطفاً درخواستت را برای دستیار بنویس.',
+        },
+        400,
+      );
     }
 
     const rawPost = (body.currentPost ?? {}) as Record<string, unknown>;
-    const contentLang = body.contentLang === 'en' ? 'en' : 'fa';
-    const adminLang = body.adminLang === 'en' ? 'en' : 'fa';
+    const contentLang: SiteLanguage = body.contentLang === 'en' ? 'en' : 'fa';
     const allCats = await listCategories();
     const result = await runAdminAiAssist({
-      prompt: prompt || (contentLang === 'en' ? 'Act on the current post fields.' : 'بر اساس متن و فیلدهای فعلی اقدام کن.'),
+      prompt:
+        prompt ||
+        (contentLang === 'en'
+          ? 'Act on the current post fields.'
+          : 'بر اساس متن و فیلدهای فعلی اقدام کن.'),
       action,
       contentLang,
       adminLang,
@@ -1461,7 +1650,12 @@ app.post('/api/admin/ai/assist', requireAdmin, async (c) => {
     if (err instanceof HTTPException) throw err;
     return c.json(
       {
-        error: err instanceof Error ? err.message : 'خطا در پردازش درخواست هوش مصنوعی.',
+        error:
+          err instanceof Error
+            ? err.message
+            : adminLang === 'en'
+              ? 'Failed to process the AI request.'
+              : 'خطا در پردازش درخواست هوش مصنوعی.',
       },
       400,
     );
@@ -1469,33 +1663,105 @@ app.post('/api/admin/ai/assist', requireAdmin, async (c) => {
 });
 
 app.post('/api/admin/ai/translate', requireAdmin, async (c) => {
+  const body = await readJsonBody(c);
+  const adminLang: SiteLanguage = body.adminLang === 'en' ? 'en' : 'fa';
   try {
-    const body = await readJsonBody(c);
     const kind = body.kind;
     if (kind !== 'post' && kind !== 'category' && kind !== 'project' && kind !== 'settings') {
-      return c.json({ error: 'نوع محتوای انتخابی برای ترجمه نامعتبر است.' }, 400);
+      return c.json(
+        {
+          error:
+            adminLang === 'en'
+              ? 'Invalid content type for translation.'
+              : 'نوع محتوای انتخابی برای ترجمه نامعتبر است.',
+        },
+        400,
+      );
     }
     const payload =
       body.payload && typeof body.payload === 'object' && !Array.isArray(body.payload)
         ? (body.payload as Record<string, unknown>)
         : null;
     if (!payload) {
-      return c.json({ error: 'داده‌ای برای ترجمه ارسال نشده است.' }, 400);
+      return c.json(
+        {
+          error:
+            adminLang === 'en'
+              ? 'No content provided for translation.'
+              : 'داده‌ای برای ترجمه ارسال نشده است.',
+        },
+        400,
+      );
     }
     const result = await translateAdminContentToEnglish({
       kind: kind as TranslateTargetKind,
       payload,
+      adminLang,
     });
     return c.json(result);
   } catch (err) {
     if (err instanceof HTTPException) throw err;
     return c.json(
       {
-        error: err instanceof Error ? err.message : 'ترجمه هوشمند با خطا مواجه شد.',
+        error:
+          err instanceof Error
+            ? err.message
+            : adminLang === 'en'
+              ? 'Smart translation failed.'
+              : 'ترجمه هوشمند با خطا مواجه شد.',
       },
       400,
     );
   }
+});
+
+// ==================== ADMIN BACKUP (EXPORT / IMPORT) ====================
+app.get('/api/admin/backup/export', requireAdmin, async (c) => {
+  const payload = await exportFullBackup();
+  const dateStamp = new Date().toISOString().slice(0, 10);
+  await writeSystemLog({
+    level: 'info',
+    source: 'backup',
+    method: 'GET',
+    path: '/api/admin/backup/export',
+    status: 200,
+    message: `Exported full site backup (${payload.posts.length} posts, ${payload.projects.length} projects, ${payload.mediaAssets.length} media)`,
+  });
+  return c.body(JSON.stringify(payload, null, 2), 200, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Disposition': `attachment; filename="site-backup-${dateStamp}.json"`,
+    'Cache-Control': 'private, no-store',
+  });
+});
+
+app.post('/api/admin/backup/import', requireAdmin, async (c) => {
+  const body = await readJsonBody(c, MAX_BACKUP_BODY_BYTES);
+  const mode = body.mode === 'merge' ? 'merge' : 'replace';
+  const rawBackup = body.backup !== undefined ? body.backup : body;
+  try {
+    const result = await importFullBackup(rawBackup, mode);
+    return c.json({ ok: true, mode, restored: result.restored });
+  } catch (err) {
+    if (err instanceof BackupValidationError) {
+      return c.json({ error: err.message }, 400);
+    }
+    throw err;
+  }
+});
+
+// ==================== ADMIN SYSTEM & ERROR LOGS ====================
+app.get('/api/admin/logs', requireAdmin, async (c) => {
+  const level = c.req.query('level') || 'all';
+  const source = c.req.query('source') || 'all';
+  const q = c.req.query('q') || '';
+  const limit = Number(c.req.query('limit') || '150');
+  const data = await listSystemLogs({ level, source, q, limit });
+  return c.json(data);
+});
+
+app.delete('/api/admin/logs', requireAdmin, async (c) => {
+  await clearSystemLogs();
+  return c.json({ ok: true });
 });
 
 // Catch-all for unknown /api/* routes
@@ -1540,9 +1806,10 @@ app.get('*', async (c) => {
   const origin = getBaseOrigin(c);
   const canonicalUrl = `${origin}${reqPath === '/' ? '/' : reqPath}`;
   const siteSettings = await getSettings();
+  const seo = buildDynamicSeoProfile(siteSettings, origin);
   let pageTitle = siteSettings.siteTitle;
   let pageDescription = siteSettings.siteDescription;
-  let pageKeywords = CORE_SEO_KEYWORDS;
+  let pageKeywords = seo.keywords;
   const defaultPoster = siteSettings.heroPosterDesktop?.trim() || '/poster.webp';
   let ogImage = defaultPoster.startsWith('http') ? defaultPoster : `${origin}${defaultPoster}`;
   let ogType = 'website';
@@ -1562,96 +1829,20 @@ app.get('*', async (c) => {
     .filter((s) => s.enabled !== false && s.url.startsWith('http'))
     .map((s) => s.url);
 
-  const personAlternateNames = Array.from(
-    new Set(
-      [
-        siteSettings.brandName,
-        siteSettings.vcardFullName,
-        ...IDENTITY_ALTERNATE_NAMES,
-      ].filter((v): v is string => Boolean(v && v.trim())),
-    ),
-  );
-
   const personNode = {
     '@type': 'Person',
     '@id': `${origin}/#person`,
-    name: siteSettings.vcardFullName || 'محمدباقر نوری',
-    alternateName: personAlternateNames,
+    name: seo.authorName,
+    alternateName: seo.alternateNames,
     url: origin,
     image: `${origin}/logo.png`,
     email: siteSettings.email ? `mailto:${siteSettings.email}` : undefined,
-    jobTitle:
-      siteSettings.vcardTitle ||
-      'طراحی سایت و ساخت اپ با هوش مصنوعی، اتوماسیون و بهینه‌سازی سیستم‌ها | AI Web & App Developer',
-    description: siteSettings.aboutBio,
+    jobTitle: siteSettings.vcardTitle || siteSettings.aboutFocusText || undefined,
+    description: siteSettings.aboutBio || siteSettings.siteDescription,
     knowsLanguage: ['fa-IR', 'en-US'],
-    knowsAbout: [
-      'طراحی سایت با هوش مصنوعی',
-      'ساخت اپلیکیشن وب و موبایل',
-      'استقرار ایجنت‌های هوش مصنوعی',
-      'اتوماسیون هوشمند فرآیندها',
-      'تعمیر و بهینه‌سازی نرم‌افزاری سیستم‌ها',
-      'AI-Assisted Web & App Development',
-      'AI Agents & Workflow Automation',
-      'Software Troubleshooting & System Optimization',
-      'Full-Stack TypeScript & Cloudflare Workers Architecture',
-    ],
-    hasOccupation: {
-      '@type': 'Occupation',
-      name: 'AI Web & App Developer, Automation & Software Optimization Specialist',
-      skills:
-        'Website Design, App Development, AI Agents, Automation, Software Optimization, React, TypeScript, Cloudflare Workers',
-    },
-    makesOffer: {
-      '@type': 'OfferCatalog',
-      name: 'خدمات طراحی سایت، ساخت اپ، هوش مصنوعی و بهینه‌سازی سیستم — Mohammad Bagher Nouri (mbnd.ir)',
-      itemListElement: [
-        {
-          '@type': 'Offer',
-          itemOffered: {
-            '@type': 'Service',
-            name: 'طراحی سایت و ساخت اپلیکیشن با هوش مصنوعی (AI Website & App Development)',
-            description:
-              'طراحی و پیاده‌سازی وب‌سایت، پورتفولیو، پنل مدیریت و اپلیکیشن‌های مدرن و سریع با کمک هوش مصنوعی.',
-          },
-        },
-        {
-          '@type': 'Offer',
-          itemOffered: {
-            '@type': 'Service',
-            name: 'استقرار ایجنت‌های هوش مصنوعی و اتوماسیون (AI Agents & Workflow Automation)',
-            description:
-              'طراحی و راه‌اندازی ایجنت‌های هوشمند و اتوماسیون کارهای تکراری برای کسب‌وکارها و تیم‌ها.',
-          },
-        },
-        {
-          '@type': 'Offer',
-          itemOffered: {
-            '@type': 'Service',
-            name: 'تعمیر و بهینه‌سازی نرم‌افزاری سیستم‌ها (Software Troubleshooting & Optimization)',
-            description:
-              'عیب‌یابی نرم‌افزاری، رفع کندی و بهینه‌سازی عملکرد سیستم‌ها و وب‌اپلیکیشن‌ها.',
-          },
-        },
-      ],
-    },
+    knowsAbout: seo.knowsAbout.length > 0 ? seo.knowsAbout : undefined,
     sameAs: sameAsLinks,
   };
-
-  const websiteAlternateNames = Array.from(
-    new Set(
-      [
-        siteSettings.siteTitle,
-        'mbnd',
-        'mbnd.ir',
-        'www.mbnd.ir',
-        'محمدباقر نوری',
-        'محمد باقر نوری',
-        'Mohammad Bagher Nouri',
-        'Mohammad Bagher Noori',
-      ].filter((v): v is string => Boolean(v && v.trim())),
-    ),
-  );
 
   let jsonLd: Record<string, unknown> = {
     '@context': 'https://schema.org',
@@ -1659,8 +1850,8 @@ app.get('*', async (c) => {
       {
         '@type': 'WebSite',
         '@id': `${origin}/#website`,
-        name: siteSettings.brandName || 'Mohammad Bagher',
-        alternateName: websiteAlternateNames,
+        name: seo.brandName,
+        alternateName: seo.alternateNames,
         url: origin,
         description: siteSettings.siteDescription,
         inLanguage: ['fa-IR', 'en-US'],
@@ -1681,21 +1872,21 @@ app.get('*', async (c) => {
   if (isSecretAdminRoute) {
     c.header('X-Robots-Tag', 'noindex, nofollow');
     c.header('Cache-Control', 'private, no-store, no-cache, must-revalidate');
-    pageTitle = `پنل مدیریت | ${siteSettings.brandName}`;
+    pageTitle = `پنل مدیریت | ${seo.brandName}`;
   } else {
     c.header('Cache-Control', 'no-cache, no-store, must-revalidate');
 
     if (reqPath === '/') {
       // Home uses default WebSite + Person JSON-LD
     } else if (reqPath === '/blog') {
-      pageTitle = `${siteSettings.blogSectionTitle || 'نوشته‌ها و تجربه‌ها'} | ${siteSettings.brandName} (mbnd.ir)`;
+      pageTitle = `${siteSettings.blogSectionTitle || 'نوشته‌ها و تجربه‌ها'} | ${seo.brandName}`;
       pageDescription = siteSettings.blogPageSubtitle || siteSettings.siteDescription;
       jsonLd = {
         '@context': 'https://schema.org',
         '@graph': [
           {
             '@type': 'Blog',
-            name: siteSettings.blogSectionTitle || 'وبلاگ محمدباقر نوری',
+            name: siteSettings.blogSectionTitle || seo.brandName,
             description: pageDescription,
             url: canonicalUrl,
             inLanguage: ['fa-IR', 'en-US'],
@@ -1714,15 +1905,15 @@ app.get('*', async (c) => {
       const slug = reqPath.slice('/blog/'.length);
       const post = await getPostBySlug(slug, false);
       if (post) {
-        pageTitle = `${post.title} | ${siteSettings.brandName}`;
+        pageTitle = `${post.title} | ${seo.brandName}`;
         pageDescription = post.excerpt;
-        pageKeywords = `${post.title}, ${post.category}, ${CORE_SEO_KEYWORDS}`;
+        pageKeywords = [post.title, post.category, seo.keywords].filter(Boolean).join(', ');
         ogType = 'article';
         articleMeta = {
           publishedTime: post.createdAt,
           modifiedTime: post.updatedAt || post.createdAt,
           section: post.category,
-          author: siteSettings.vcardFullName || 'محمدباقر نوری',
+          author: seo.authorName,
         };
         if (post.coverImage) {
           ogImage = post.coverImage.startsWith('http')
@@ -1762,10 +1953,10 @@ app.get('*', async (c) => {
         };
       } else {
         httpStatus = 404;
-        pageTitle = `نوشته پیدا نشد | ${siteSettings.brandName}`;
+        pageTitle = `نوشته پیدا نشد | ${seo.brandName}`;
       }
     } else if (reqPath === '/projects') {
-      pageTitle = `${siteSettings.projectsSectionTitle || 'پروژه‌ها'} | ${siteSettings.brandName} (mbnd.ir)`;
+      pageTitle = `${siteSettings.projectsSectionTitle || 'پروژه‌ها'} | ${seo.brandName}`;
       pageDescription = siteSettings.projectsPageSubtitle || siteSettings.siteDescription;
       jsonLd = {
         '@context': 'https://schema.org',
@@ -1802,7 +1993,7 @@ app.get('*', async (c) => {
         ],
       };
     } else if (reqPath === '/about') {
-      pageTitle = `${siteSettings.aboutTitle || 'درباره من و ارتباط'} | ${siteSettings.brandName} (mbnd.ir)`;
+      pageTitle = `${siteSettings.aboutTitle || 'درباره من و ارتباط'} | ${seo.brandName}`;
       pageDescription = siteSettings.aboutBio || siteSettings.siteDescription;
       jsonLd = {
         '@context': 'https://schema.org',
@@ -1826,7 +2017,7 @@ app.get('*', async (c) => {
       };
     } else {
       httpStatus = 404;
-      pageTitle = `صفحه پیدا نشد | ${siteSettings.brandName}`;
+      pageTitle = `صفحه پیدا نشد | ${seo.brandName}`;
     }
   }
 
@@ -1839,12 +2030,20 @@ app.get('*', async (c) => {
     )
     .replace(/<title>.*?<\/title>/s, `<title>${escapeHtmlAttr(pageTitle)}</title>`)
     .replace(
+      /<meta\s+name="author"\s+content="[^"]*"\s*\/>/s,
+      `<meta name="author" content="${escapeHtmlAttr(seo.authorName)}" />`,
+    )
+    .replace(
       /<meta\s+name="description"\s+content="[^"]*"\s*\/>/s,
       `<meta name="description" content="${escapeHtmlAttr(pageDescription)}" />`,
     )
     .replace(
       /<meta\s+name="keywords"\s+content="[^"]*"\s*\/>/s,
       `<meta name="keywords" content="${escapeHtmlAttr(pageKeywords)}" />`,
+    )
+    .replace(
+      /<meta\s+property="og:site_name"\s+content="[^"]*"\s*\/>/s,
+      `<meta property="og:site_name" content="${escapeHtmlAttr(seo.brandName)}" />`,
     )
     .replace(
       /<meta\s+property="og:title"\s+content="[^"]*"\s*\/>/s,
@@ -1930,15 +2129,32 @@ app.get('*', async (c) => {
   return c.html(html, httpStatus);
 });
 
-// Global error handler — ensures /api/* always returns clean JSON
-app.onError((err, c) => {
+// Global error handler — ensures /api/* always returns clean JSON and logs unhandled errors
+app.onError(async (err, c) => {
   if (err instanceof HTTPException) {
+    await writeSystemLog({
+      level: err.status >= 500 ? 'error' : 'warn',
+      source: inferLogSourceFromPath(c.req.path),
+      method: c.req.method,
+      path: c.req.path,
+      status: err.status,
+      message: err.message || `HTTP ${err.status}`,
+    });
     if (c.req.path.startsWith('/api/')) {
       return c.json({ error: err.message || 'درخواست نامعتبر است.' }, err.status);
     }
     return c.text(err.message || 'Error', err.status);
   }
   console.error('Unhandled Hono error:', err);
+  await writeSystemLog({
+    level: 'error',
+    source: inferLogSourceFromPath(c.req.path),
+    method: c.req.method,
+    path: c.req.path,
+    status: 500,
+    message: err instanceof Error ? err.message : 'Unhandled server error',
+    details: err instanceof Error ? err.stack || err.message : String(err),
+  });
   if (c.req.path.startsWith('/api/')) {
     return c.json({ error: 'خطای داخلی سرور رخ داد.' }, 500);
   }

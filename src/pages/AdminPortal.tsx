@@ -4,6 +4,7 @@ import {
   BookOpen,
   Check,
   Copy,
+  DatabaseBackup,
   Download,
   ExternalLink,
   FolderOpen,
@@ -21,6 +22,7 @@ import {
   Plus,
   RotateCcw,
   Save,
+  ScrollText,
   Settings,
   Share2,
   ShieldCheck,
@@ -32,6 +34,8 @@ import {
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { AdminAiAssistant } from '../components/admin/AdminAiAssistant.tsx';
 import { AdminAppearancePanel } from '../components/admin/AdminAppearancePanel.tsx';
+import { AdminBackupPanel } from '../components/admin/AdminBackupPanel.tsx';
+import { AdminLogsPanel } from '../components/admin/AdminLogsPanel.tsx';
 import { PostBlockBuilder } from '../components/admin/PostBlockBuilder.tsx';
 import { BrandLogo, SocialIcon } from '../components/BrandMark.tsx';
 import { getAdminDict } from '../lib/adminI18n.ts';
@@ -63,6 +67,8 @@ type AdminTab =
   | 'socials'
   | 'appearance'
   | 'settings'
+  | 'backup'
+  | 'logs'
   | 'inbox'
   | 'media';
 
@@ -317,13 +323,14 @@ export function AdminPortal() {
   // vCard Extra Fields State
   const [vcardExtraFields, setVcardExtraFields] = useState<VCardExtraField[]>([]);
 
-  // AI Settings Form State
+  // AI Settings Form State (empty model by default for security)
   const [aiProvider, setAiProvider] = useState<AiProviderType>('gemini');
-  const [aiModel, setAiModel] = useState('gemini-4-hydrogen');
+  const [aiModel, setAiModel] = useState('');
   const [aiBaseUrl, setAiBaseUrl] = useState('');
   const [aiApiKeyInput, setAiApiKeyInput] = useState('');
   const [testingAi, setTestingAi] = useState(false);
   const [aiTestResult, setAiTestResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const [logErrorCount, setLogErrorCount] = useState(0);
 
   // Security Credentials Form State
   const [secCurrentPassword, setSecCurrentPassword] = useState('');
@@ -400,9 +407,9 @@ export function AdminPortal() {
   useEffect(() => {
     document.documentElement.lang = adminLang;
     document.documentElement.dir = adminLang === 'en' ? 'ltr' : 'rtl';
-    document.title =
-      adminLang === 'en' ? 'Admin Portal | Mohammad Bagher' : 'پنل مدیریت | Mohammad Bagher';
-  }, [adminLang]);
+    const brand = settings?.brandName || publicThemeSettings.brandName || 'My Portfolio';
+    document.title = adminLang === 'en' ? `Admin Portal | ${brand}` : `پنل مدیریت | ${brand}`;
+  }, [adminLang, settings?.brandName, publicThemeSettings.brandName]);
 
   // Fetch public theme settings on mount so even the login screen mirrors site theme & colors
   useEffect(() => {
@@ -473,6 +480,15 @@ export function AdminPortal() {
     postBlocks,
     postBlocksEn,
   ]);
+
+  const authHeaders = useCallback((extra?: Record<string, string>): Record<string, string> => {
+    const token = getStoredToken();
+    return {
+      'X-Requested-With': 'XMLHttpRequest',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(extra || {}),
+    };
+  }, []);
 
   const adminFetch = useCallback(async (input: string, init: RequestInit = {}) => {
     const token = getStoredToken();
@@ -714,7 +730,7 @@ export function AdminPortal() {
       const res = await adminFetch('/api/admin/ai/translate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ kind, payload }),
+        body: JSON.stringify({ kind, payload, adminLang }),
       });
       const data = await safeJson<{ translated?: Record<string, unknown> }>(res);
       if (!res.ok || !data.translated) {
@@ -1417,6 +1433,7 @@ export function AdminPortal() {
           model: aiModel.trim(),
           baseUrl: aiBaseUrl.trim(),
           apiKey: aiApiKeyInput.trim() || undefined,
+          adminLang,
         }),
       });
       const data = await safeJson<{ aiConfig?: AiConfigPublic }>(res);
@@ -1446,7 +1463,7 @@ export function AdminPortal() {
       const res = await adminFetch('/api/admin/ai/config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ clearCustomApiKey: true }),
+        body: JSON.stringify({ clearCustomApiKey: true, adminLang }),
       });
       const data = await safeJson<{ aiConfig?: AiConfigPublic }>(res);
       if (!res.ok || !data.aiConfig) {
@@ -1477,6 +1494,7 @@ export function AdminPortal() {
           model: aiModel.trim(),
           baseUrl: aiBaseUrl.trim(),
           apiKey: aiApiKeyInput.trim() || undefined,
+          adminLang,
         }),
       });
       const data = await safeJson<{ ok?: boolean; model?: string; reply?: string }>(res);
@@ -1634,7 +1652,7 @@ export function AdminPortal() {
             <BrandLogo
               src={publicThemeSettings.logoImage}
               className="h-14 w-14"
-              alt="Mohammad Bagher"
+              alt="Site Logo"
             />
             <h1 className="mt-4 text-xl font-extrabold text-[var(--ink)]">
               {needsSetup ? adminDict.firstRunTitle : adminDict.portalTitle}
@@ -1751,6 +1769,8 @@ export function AdminPortal() {
     { id: 'socials', label: isEn ? 'Social Links' : 'پیام‌رسان‌ها', icon: Share2 },
     { id: 'appearance', label: adminDict.tabAppearance, icon: Palette },
     { id: 'settings', label: isEn ? 'Copy, AI & Security' : 'تنظیمات، امنیت و AI', icon: Settings },
+    { id: 'backup', label: adminDict.tabBackup, icon: DatabaseBackup },
+    { id: 'logs', label: adminDict.tabLogs, icon: ScrollText, badge: logErrorCount || undefined },
     { id: 'inbox', label: adminDict.tabMessages, icon: Inbox, badge: unreadCount || undefined },
     { id: 'media', label: adminDict.tabMedia, icon: FolderOpen, badge: media.length || undefined },
   ];
@@ -1765,7 +1785,7 @@ export function AdminPortal() {
             <div>
               <h1 className="text-sm font-bold text-[var(--ink)]">{adminDict.portalTitle}</h1>
               <p className="text-[11px] text-[var(--ink-faint)]" dir="ltr">
-                {settings?.brandName || 'Mohammad Bagher'}
+                {settings?.brandName || 'My Portfolio'}
               </p>
             </div>
           </div>
@@ -3294,10 +3314,10 @@ export function AdminPortal() {
                         }
                         placeholder={
                           settingsLangTab === 'en'
-                            ? '© 2026 Mohammad Bagher'
+                            ? '© 2026 My Portfolio'
                             : isEn
                               ? 'Persian footer copyright text...'
-                              : '© ۱۴۰۵ Mohammad Bagher'
+                              : '© ۱۴۰۵ My Portfolio'
                         }
                         className="w-full rounded-xl border border-[var(--hair-strong)] bg-[var(--ground-deep)] px-3.5 py-2 text-sm text-[var(--ink)] focus:border-[var(--flame)] focus:outline-none"
                       />
@@ -3630,7 +3650,7 @@ export function AdminPortal() {
                     </label>
                     <a
                       href="/api/save-contact?download=1"
-                      download="mohammad-bagher.vcf"
+                      download="contact.vcf"
                       className="inline-flex items-center gap-1.5 rounded-xl border border-[var(--flame-border)] bg-[var(--flame-tint)] px-3.5 py-2 text-xs font-medium text-[var(--ink)] hover:opacity-90"
                     >
                       <Download className="h-3.5 w-3.5 text-[var(--flame)]" />
@@ -3711,7 +3731,7 @@ export function AdminPortal() {
                       type="text"
                       value={settings.vcardOrg || ''}
                       onChange={(e) => setSettings({ ...settings, vcardOrg: e.target.value })}
-                      placeholder="Mohammad Bagher"
+                      placeholder={isEn ? 'Your Brand / Company' : 'نام برند یا شرکت'}
                       className="w-full rounded-xl border border-[var(--hair-strong)] bg-[var(--ground-deep)] px-3.5 py-2 text-sm text-[var(--ink)] focus:border-[var(--flame)] focus:outline-none"
                     />
                   </div>
@@ -3750,7 +3770,7 @@ export function AdminPortal() {
                       dir="ltr"
                       value={settings.vcardPhone}
                       onChange={(e) => setSettings({ ...settings, vcardPhone: e.target.value })}
-                      placeholder="+98..."
+                      placeholder="+98912..."
                       className="w-full rounded-xl border border-[var(--hair-strong)] bg-[var(--ground-deep)] px-3.5 py-2 font-mono text-sm text-[var(--ink)] placeholder:text-[var(--ink-faint)] focus:border-[var(--flame)] focus:outline-none"
                     />
                   </div>
@@ -3764,7 +3784,7 @@ export function AdminPortal() {
                       dir="ltr"
                       value={settings.vcardWebsite}
                       onChange={(e) => setSettings({ ...settings, vcardWebsite: e.target.value })}
-                      placeholder="https://mbnd.ir"
+                      placeholder="https://example.com"
                       className="w-full rounded-xl border border-[var(--hair-strong)] bg-[var(--ground-deep)] px-3.5 py-2 font-mono text-sm text-[var(--ink)] placeholder:text-[var(--ink-faint)] focus:border-[var(--flame)] focus:outline-none"
                     />
                   </div>
@@ -3862,7 +3882,7 @@ export function AdminPortal() {
                                 : field.type === 'url'
                                   ? 'https://...'
                                   : field.type === 'email'
-                                    ? 'work@mbnd.ir'
+                                    ? 'work@example.com'
                                     : isEn
                                       ? 'Field value...'
                                       : 'مقدار فیلد...'
@@ -3970,13 +3990,7 @@ export function AdminPortal() {
                       id="ai-provider"
                       value={aiProvider}
                       onChange={(e) => {
-                        const next = e.target.value as AiProviderType;
-                        setAiProvider(next);
-                        if (next === 'gemini' && !aiModel.includes('gemini')) {
-                          setAiModel('gemini-4-hydrogen');
-                        } else if (next === 'openai_compatible' && aiModel.includes('gemini')) {
-                          setAiModel('gpt-4.1-mini');
-                        }
+                        setAiProvider(e.target.value as AiProviderType);
                       }}
                       className="w-full rounded-xl border border-[var(--hair-strong)] bg-[var(--ground-deep)] px-3.5 py-2.5 text-sm text-[var(--ink)] focus:border-[var(--flame)] focus:outline-none"
                     >
@@ -3999,7 +4013,11 @@ export function AdminPortal() {
                       dir="ltr"
                       value={aiModel}
                       onChange={(e) => setAiModel(e.target.value)}
-                      placeholder={aiProvider === 'gemini' ? 'gemini-4-hydrogen' : 'gpt-4.1-mini'}
+                      placeholder={
+                        isEn
+                          ? 'Enter model ID (e.g. gemini-2.5-flash)'
+                          : 'نام مدل را وارد کن (مثلاً gemini-2.5-flash)'
+                      }
                       className="w-full rounded-xl border border-[var(--hair-strong)] bg-[var(--ground-deep)] px-3.5 py-2.5 font-mono text-sm text-[var(--ink)] placeholder:text-[var(--ink-faint)] focus:border-[var(--flame)] focus:outline-none"
                     />
                     <div className="mt-1.5 flex flex-wrap gap-1.5">
@@ -4398,6 +4416,34 @@ export function AdminPortal() {
               </div>
             )}
           </section>
+        )}
+
+        {/* ==================== TAB: BACKUP & RESTORE ==================== */}
+        {tab === 'backup' && settings && (
+          <AdminBackupPanel
+            adminLang={adminLang}
+            counts={{
+              settings: Object.keys(settings).length,
+              categories: categories.length,
+              posts: posts.length,
+              projects: projects.length,
+              messages: messages.length,
+              media: media.length,
+            }}
+            authHeaders={authHeaders}
+            onRestored={loadBootstrap}
+            onNotify={(msg, isError) => (isError ? flashError(msg) : flashNotice(msg))}
+          />
+        )}
+
+        {/* ==================== TAB: SYSTEM & ERROR LOGS ==================== */}
+        {tab === 'logs' && (
+          <AdminLogsPanel
+            adminLang={adminLang}
+            authHeaders={authHeaders}
+            onErrorCountChange={setLogErrorCount}
+            onNotify={(msg, isError) => (isError ? flashError(msg) : flashNotice(msg))}
+          />
         )}
       </main>
     </div>

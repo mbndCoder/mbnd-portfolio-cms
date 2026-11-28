@@ -16,7 +16,7 @@ export function HomePage({ data, lang }: HomePageProps) {
   useEffect(() => {
     document.title =
       lang === 'en'
-        ? data.settings.brandName || 'Mohammad Bagher'
+        ? data.settings.brandName || 'My Portfolio'
         : data.settings.siteTitle;
   }, [data.settings.siteTitle, data.settings.brandName, lang]);
 

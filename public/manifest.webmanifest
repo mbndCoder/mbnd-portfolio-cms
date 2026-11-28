@@ -1,7 +1,7 @@
 {
-  "name": "Mohammad Bagher | محمدباقر",
-  "short_name": "Mohammad Bagher",
-  "description": "پورتفولیو و وبلاگ شخصی محمدباقر؛ طراحی اپ و سایت با هوش مصنوعی، اتوماسیون، ایجنت‌ها و بهینه‌سازی نرم‌افزاری سیستم‌ها.",
+  "name": "Personal Portfolio & Blog",
+  "short_name": "Portfolio",
+  "description": "پورتفولیو و وبلاگ شخصی دوزبانه با پنل مدیریت اختصاصی.",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0E0E0E",

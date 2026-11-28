@@ -133,7 +133,7 @@ export function BlogPostPage({ posts, categories, settings, lang }: BlogPostPage
   const shareUrl =
     typeof window !== 'undefined'
       ? window.location.href
-      : `https://mbnd.ir/blog/${encodeURIComponent(post.slug)}`;
+      : `/blog/${encodeURIComponent(post.slug)}`;
   const encodedUrl = encodeURIComponent(shareUrl);
   const encodedTitle = encodeURIComponent(locPost.title);
   const encodedWhatsApp = encodeURIComponent(`${locPost.title}\n${shareUrl}`);
@@ -340,8 +340,8 @@ export function BlogPostPage({ posts, categories, settings, lang }: BlogPostPage
             {t.author}{' '}
             <strong className="font-semibold text-[var(--ink)]">
               {lang === 'en'
-                ? settings.brandName || 'Mohammad Bagher'
-                : settings.vcardFullName || settings.brandName}
+                ? settings.brandName || 'My Portfolio'
+                : settings.vcardFullName || settings.brandName || 'My Portfolio'}
             </strong>
           </p>
           <Link

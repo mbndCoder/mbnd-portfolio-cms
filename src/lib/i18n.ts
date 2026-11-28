@@ -462,8 +462,8 @@ export function getLocalizedSettingsText(
       lang,
       settings.footerText,
       settings.footerTextEn,
-      `© ۱۴۰۵ ${settings.brandName || 'Mohammad Bagher'}`,
-      `© 2026 ${settings.brandName || 'Mohammad Bagher'}`,
+      `© ۱۴۰۵ ${settings.brandName || 'My Portfolio'}`,
+      `© 2026 ${settings.brandName || 'My Portfolio'}`,
     ),
     shareHeading: pickLocalizedText(
       lang,

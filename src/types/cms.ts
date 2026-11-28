@@ -357,3 +357,70 @@ export interface PublicSiteData {
   posts: BlogPost[];
   projects: ProjectItem[];
 }
+
+export type SystemLogLevel = 'info' | 'warn' | 'error';
+
+export type SystemLogSource =
+  | 'server'
+  | 'auth'
+  | 'db'
+  | 'settings'
+  | 'vcard'
+  | 'posts'
+  | 'categories'
+  | 'projects'
+  | 'media'
+  | 'ai'
+  | 'backup'
+  | 'contact'
+  | 'client';
+
+export interface SystemLogEntry {
+  id: number;
+  level: SystemLogLevel;
+  source: SystemLogSource;
+  method: string;
+  path: string;
+  status: number;
+  message: string;
+  details: string;
+  createdAt: string;
+}
+
+export interface SystemLogsResponse {
+  logs: SystemLogEntry[];
+  counts: {
+    total: number;
+    error: number;
+    warn: number;
+    info: number;
+  };
+}
+
+export interface BackupMediaRecord {
+  publicId: string;
+  filename: string;
+  url: string;
+  kind: 'image' | 'video' | 'audio' | 'file';
+  resourceType: 'image' | 'video' | 'raw';
+  sizeBytes: number;
+  createdAt: string;
+}
+
+export interface SiteBackupPayload {
+  format: 'cms-full-backup';
+  version: 1;
+  exportedAt: string;
+  settings: Partial<SiteSettings>;
+  aiConfig?: {
+    provider: AiProviderType;
+    model: string;
+    baseUrl: string;
+  };
+  categories: Array<Omit<CategoryItem, 'id'> & { id?: number }>;
+  posts: Array<Omit<BlogPost, 'id'> & { id?: number }>;
+  projects: Array<Omit<ProjectItem, 'id'> & { id?: number }>;
+  messages: Array<Omit<ContactMessage, 'id'> & { id?: number }>;
+  mediaAssets: BackupMediaRecord[];
+}
+

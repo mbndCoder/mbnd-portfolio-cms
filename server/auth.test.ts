@@ -26,7 +26,7 @@ test('extractClientIp prefers Cloudflare header, then x-forwarded-for, then fall
   assert.equal(extractClientIp({}, '127.0.0.1'), '127.0.0.1');
 });
 
-test('AI config disables automatic env fallback and rejects connection test without custom key', async () => {
+test('AI config leaves default model/key empty and rejects connection test with concise bilingual messages', async () => {
   const { createClient } = await import('@libsql/client');
   const { getAiConfigPublic, setCustomLibsqlClient } = await import('./db.ts');
   const { testAdminAiConnection } = await import('./ai.ts');
@@ -34,16 +34,40 @@ test('AI config disables automatic env fallback and rejects connection test with
   const pub = await getAiConfigPublic();
   assert.equal(pub.envGeminiAvailable, false);
   assert.equal(pub.envOpenAiAvailable, false);
-  assert.ok(pub.model.length > 0);
+  assert.equal(pub.model, '');
+  assert.equal(pub.hasCustomApiKey, false);
 
   await assert.rejects(
     () =>
       testAdminAiConnection({
         provider: 'gemini',
-        model: 'gemini-4-hydrogen',
+        model: 'gemini-2.5-flash',
         apiKey: '',
+        adminLang: 'fa',
       }),
-    /کلید پیش‌فرض غیرفعال است/,
+    /^Error: کلید API تنظیم نشده است\.$/,
+  );
+
+  await assert.rejects(
+    () =>
+      testAdminAiConnection({
+        provider: 'gemini',
+        model: 'gemini-2.5-flash',
+        apiKey: '',
+        adminLang: 'en',
+      }),
+    /^Error: API key is not configured\.$/,
+  );
+
+  await assert.rejects(
+    () =>
+      testAdminAiConnection({
+        provider: 'gemini',
+        model: '',
+        apiKey: 'AIzaFakeKey1234567890',
+        adminLang: 'en',
+      }),
+    /^Error: AI model is not configured\.$/,
   );
 });
 

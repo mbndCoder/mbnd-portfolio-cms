@@ -41,11 +41,10 @@ const LANG_STORAGE_KEY = 'mbnd_lang_pref';
 
 const FALLBACK_SITE_DATA: PublicSiteData = {
   settings: {
-    siteTitle:
-      'محمدباقر نوری (Mohammad Bagher Nouri) | طراحی سایت، ساخت اپ و اتوماسیون هوش مصنوعی — mbnd.ir',
+    siteTitle: 'پورتفولیو و وبلاگ شخصی | Personal Portfolio & Blog',
     siteDescription:
-      'وب‌سایت رسمی محمدباقر نوری (Mohammad Bagher Nouri / Noori — mbnd.ir): طراحی سایت و ساخت اپلیکیشن با هوش مصنوعی، استقرار ایجنت‌های هوش مصنوعی و اتوماسیون، تعمیر و بهینه‌سازی نرم‌افزاری سیستم‌ها.',
-    brandName: 'Mohammad Bagher',
+      'وب‌سایت شخصی، پورتفولیو و وبلاگ دوزبانه برای معرفی پروژه‌ها، اشتراک‌گذاری یادداشت‌ها و ارتباط مستقیم.',
+    brandName: 'My Portfolio',
     logoImage: '/logo.webp',
     faviconImage: '/favicon.png',
 
@@ -55,45 +54,45 @@ const FALLBACK_SITE_DATA: PublicSiteData = {
     heroPosterDesktop: '/poster.webp',
     heroPosterMobile: '/poster-mobile.webp',
 
-    heroTitle: 'سلام! من محمدباقر هستم.',
+    heroTitle: 'سلام! خوش آمدی.',
     heroSubtitle:
-      'اینجا از خودم و چیزایی که یاد می‌گیرم می‌نویسم. طراحی اپ و سایت با هوش مصنوعی، استقرار ایجنت‌ها و اتوماسیون، و تعمیر و بهینه‌سازی نرم‌افزاری سیستم‌ها.',
+      'اینجا درباره پروژه‌هایی که می‌سازم، ابزارهایی که تست می‌کنم و تجربه‌های مسیر یادگیری می‌نویسم.',
     blogSectionTitle: 'نوشته‌ها و تجربه‌ها',
     blogPageTitle: 'وبلاگ',
     blogPageSubtitle:
-      'یادداشت‌ها و تجربه‌های من درباره هوش مصنوعی، اتوماسیون، اقتصاد و بهینه‌سازی سیستم‌ها.',
+      'یادداشت‌ها، آموزش‌ها و تجربه‌های عملی درباره تکنولوژی، طراحی محصول و یادگیری.',
     projectsSectionTitle: 'پروژه‌ها',
-    projectsPageSubtitle: 'مجموعه‌ای از ابزارها، وب‌اپلیکیشن‌ها و تجربه‌های عملی ساخته‌شده.',
+    projectsPageSubtitle: 'مجموعه‌ای از ابزارها، وب‌اپلیکیشن‌ها و پروژه‌های منتخب.',
     aboutTitle: 'درباره من و ارتباط',
     aboutBio:
-      'خوش اومدی! من محمدباقر هستم و علاقه‌مندم چیزهای جدید رو با آزمون و خطا یاد بگیرم؛ از طراحی اپ و سایت با هوش مصنوعی و ساخت ایجنت‌ها و اتوماسیون گرفته تا تعمیر و بهینه‌سازی نرم‌افزاری سیستم‌ها.',
+      'این یک متن معرفی نمونه است که می‌توانی از بخش تنظیمات پنل مدیریت آن را متناسب با خودت، مهارت‌ها و حوزه‌های فعالیتت ویرایش کنی.',
     aboutFocusHeading: 'حوزه‌های فعالیت',
-    aboutFocusText: 'طراحی اپ و سایت با هوش مصنوعی · اتوماسیون و تعمیر نرم‌افزاری سیستم‌ها',
+    aboutFocusText: 'توسعه وب و اپلیکیشن · طراحی محصول · اتوماسیون و هوش مصنوعی',
     aboutConnectHeading: 'راه‌های ارتباطی مستقیم',
     contactFormHeading: 'ارسال پیام مستقیم',
-    contactSuccessMessage: 'پیامت با موفقیت ثبت شد؛ ممنون از ارتباطت!',
+    contactSuccessMessage: 'پیام شما با موفقیت ثبت شد؛ ممنون از ارتباطتان!',
     vcardButtonLabel: 'افزودن به مخاطبین',
-    footerText: '© ۱۴۰۵ Mohammad Bagher',
+    footerText: '© ۱۴۰۵ My Portfolio',
 
-    heroTitleEn: "Hi, I'm Mohammad Bagher.",
+    heroTitleEn: 'Hi, welcome to my space.',
     heroSubtitleEn:
-      'I share what I build and learn along the way — from AI-assisted apps and websites to agent automation and software troubleshooting.',
+      'I share the projects I build, tools I explore, and hands-on notes from my learning journey.',
     blogSectionTitleEn: 'Notes & Writing',
     blogPageTitleEn: 'Blog',
     blogPageSubtitleEn:
-      'Field notes and hands-on experiments covering AI tools, automation workflows, economics, and system optimization.',
+      'Field notes, tutorials, and practical experiments covering technology, design, and engineering.',
     projectsSectionTitleEn: 'Projects',
-    projectsPageSubtitleEn: 'Selected apps, tools, and practical experiments I have built.',
+    projectsPageSubtitleEn: 'Selected apps, tools, and practical experiments.',
     aboutTitleEn: 'About & Contact',
     aboutBioEn:
-      "Welcome! I'm Mohammad Bagher. I enjoy learning by building — designing apps and websites with AI, deploying practical automation agents, and troubleshooting and optimizing software systems. Feel free to drop me a message anytime.",
+      'This is a sample biography you can customize anytime from the Admin Portal to introduce yourself, your skills, and how visitors can reach you.',
     aboutFocusHeadingEn: 'What I Focus On',
-    aboutFocusTextEn: 'AI-Assisted Web & App Design · Agent Automation · Software Troubleshooting',
+    aboutFocusTextEn: 'Web & App Development · Product Design · Automation & AI',
     aboutConnectHeadingEn: 'Direct Channels',
     contactFormHeadingEn: 'Send a Direct Message',
     contactSuccessMessageEn: 'Message received — thanks for reaching out!',
     vcardButtonLabelEn: 'Save Contact',
-    footerTextEn: '© 2026 Mohammad Bagher',
+    footerTextEn: '© 2026 My Portfolio',
 
     navItemsJson: JSON.stringify(DEFAULT_NAV_ITEMS),
     showHeroSection: 'true',
@@ -115,7 +114,7 @@ const FALLBACK_SITE_DATA: PublicSiteData = {
     shareNativeEnabled: 'true',
 
     themeMode: 'dark',
-    allowThemeToggle: 'false',
+    allowThemeToggle: 'true',
     accentColor: '#FF502B',
     darkBgColor: '#0E0E0E',
     darkSurfaceColor: '#121212',
@@ -124,18 +123,18 @@ const FALLBACK_SITE_DATA: PublicSiteData = {
     lightSurfaceColor: '#FFFFFF',
     lightInkColor: '#181615',
     defaultLanguage: 'fa',
-    allowLanguageToggle: 'false',
+    allowLanguageToggle: 'true',
 
-    email: 'mbnd1224@gmail.com',
-    telegramHandle: '@mbnd1224',
-    telegramUrl: 'https://t.me/mbnd1224',
+    email: 'hello@example.com',
+    telegramHandle: '',
+    telegramUrl: '',
     vcardEnabled: 'true',
-    vcardFullName: 'محمدباقر نوری',
-    vcardOrg: 'Mohammad Bagher',
-    vcardTitle: 'طراحی اپ و سایت با هوش مصنوعی · اتوماسیون و بهینه‌سازی سیستم‌ها',
+    vcardFullName: 'Your Name',
+    vcardOrg: 'My Portfolio',
+    vcardTitle: 'Web & App Developer · Designer',
     vcardNote: '',
     vcardPhone: '',
-    vcardWebsite: 'https://mbnd.ir',
+    vcardWebsite: '',
     vcardAvatar: '/vcard-avatar.jpg',
     vcardExtraFieldsJson: '[]',
     socialLinksJson: '[]',
@@ -143,11 +142,11 @@ const FALLBACK_SITE_DATA: PublicSiteData = {
   categories: [
     {
       id: 1,
-      name: 'اقتصاد',
-      nameEn: 'Economy',
-      slug: 'اقتصاد',
-      description: 'در حال تلاش برای بهتر کردن اقتصاد همه‌مون',
-      descriptionEn: 'Working on practical ideas to improve our shared economy',
+      name: 'تکنولوژی',
+      nameEn: 'Technology',
+      slug: 'تکنولوژی',
+      description: 'یادداشت‌هایی درباره توسعه وب، ابزارهای مدرن و معماری نرم‌افزار',
+      descriptionEn: 'Notes on web development, modern tools, and software architecture',
       sortOrder: 1,
     },
     {
@@ -155,8 +154,8 @@ const FALLBACK_SITE_DATA: PublicSiteData = {
       name: 'یادگیری',
       nameEn: 'Learning',
       slug: 'یادگیری',
-      description: 'تجربه‌های روزانه در هوش مصنوعی، اتوماسیون و سیستم‌ها',
-      descriptionEn: 'Daily notes on AI, automation, and building resilient systems',
+      description: 'تجربه‌های روزانه، آزمون و خطاها و خلاصه کتاب‌ها و پروژه‌ها',
+      descriptionEn: 'Daily experiments, lessons learned, and practical project notes',
       sortOrder: 2,
     },
   ],
@@ -232,14 +231,11 @@ function RouteSeoSync({ data, lang }: { data: PublicSiteData; lang: SiteLanguage
   useEffect(() => {
     const s = data.settings;
     const loc = getLocalizedSettingsText(s, lang);
-    const brand =
-      lang === 'en'
-        ? `${s.brandName || 'Mohammad Bagher'} Nouri | mbnd.ir`
-        : `${s.brandName || 'Mohammad Bagher'} | محمدباقر نوری`;
+    const brand = (s.brandName || s.vcardFullName || 'Portfolio').trim();
 
     let title =
       lang === 'en'
-        ? 'Mohammad Bagher Nouri (mbnd.ir) | AI Web & App Design, Agents & Automation'
+        ? `${brand} | ${loc.heroTitle || 'Portfolio & Blog'}`
         : s.siteTitle || brand;
     let desc =
       lang === 'en'
@@ -274,7 +270,7 @@ function RouteSeoSync({ data, lang }: { data: PublicSiteData; lang: SiteLanguage
 
     const canonical = document.querySelector<HTMLLinkElement>('link[rel="canonical"]');
     if (canonical && typeof window !== 'undefined') {
-      const origin = window.location.origin.replace(/^https?:\/\/www\.mbnd\.ir$/i, 'https://mbnd.ir');
+      const origin = window.location.origin.replace(/^(https?:\/\/)www\./i, '$1');
       canonical.setAttribute('href', `${origin}${pathname === '/' ? '/' : pathname}`);
     }
   }, [pathname, data, lang]);

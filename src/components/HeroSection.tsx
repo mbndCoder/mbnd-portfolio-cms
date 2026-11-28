@@ -35,7 +35,7 @@ export function parseClientSocialLinks(
       id: 'telegram',
       label: 'تلگرام',
       labelEn: 'Telegram',
-      handle: settings.telegramHandle || '@mbnd1224',
+      handle: settings.telegramHandle || '',
       url: settings.telegramUrl,
       iconKey: 'telegram',
       enabled: true,

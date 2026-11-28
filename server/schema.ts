@@ -78,3 +78,16 @@ export const mediaAssets = sqliteTable('media_assets', {
   sizeBytes: integer('size_bytes').notNull().default(0),
   createdAt: text('created_at').notNull(),
 });
+
+export const systemLogs = sqliteTable('system_logs', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  level: text('level').notNull().default('info'),
+  source: text('source').notNull().default('server'),
+  method: text('method').notNull().default(''),
+  path: text('path').notNull().default(''),
+  status: integer('status').notNull().default(0),
+  message: text('message').notNull(),
+  details: text('details').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+});
+

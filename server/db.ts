@@ -1,6 +1,6 @@
 import { createClient, type Client } from '@libsql/client/web';
 import { drizzle } from 'drizzle-orm/libsql/web';
-import { asc, desc, eq, or } from 'drizzle-orm';
+import { asc, desc, eq, inArray, or } from 'drizzle-orm';
 
 type LibSQLDatabase = ReturnType<typeof drizzle>;
 import {
@@ -10,6 +10,7 @@ import {
   posts,
   projectsTable,
   settings,
+  systemLogs,
   users,
 } from './schema.ts';
 import {
@@ -19,6 +20,11 @@ import {
   verifyPasswordScrypt,
 } from './auth.ts';
 import { getEnvVar, setActiveRuntimeEnv, type RuntimeEnv } from './env.ts';
+import {
+  createBackupEnvelope,
+  validateAndNormalizeBackupPayload,
+} from './backup.ts';
+import { normalizeLogLevel, normalizeLogSource, sanitizeLogText } from './logs.ts';
 import { parseBlocksJson } from '../src/lib/blocks.ts';
 import { estimateReadingMinutes, slugifyPersian } from '../src/lib/slug.ts';
 import type {
@@ -29,8 +35,13 @@ import type {
   ContactMessage,
   ContentBlock,
   ProjectItem,
+  SiteBackupPayload,
   SiteSettings,
   SocialPlatformLink,
+  SystemLogEntry,
+  SystemLogLevel,
+  SystemLogSource,
+  SystemLogsResponse,
   UploadedMediaItem,
   VCardExtraField,
   VCardExtraFieldType,
@@ -220,29 +231,31 @@ const SCHEMA_STATEMENTS: string[] = [
     size_bytes INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS system_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    level TEXT NOT NULL DEFAULT 'info',
+    source TEXT NOT NULL DEFAULT 'server',
+    method TEXT NOT NULL DEFAULT '',
+    path TEXT NOT NULL DEFAULT '',
+    status INTEGER NOT NULL DEFAULT 0,
+    message TEXT NOT NULL,
+    details TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+  )`,
 ];
 
-const ALLOWED_MIGRATION_TABLES = new Set([
-  'users',
-  'categories',
-  'posts',
-  'projects',
-  'media_assets',
-]);
-
-async function ensureColumn(
-  client: Client,
-  table: string,
-  col: string,
-  definition: string,
-): Promise<void> {
-  if (!ALLOWED_MIGRATION_TABLES.has(table)) return;
-  const info = await client.execute(`PRAGMA table_info(${table})`);
-  const exists = info.rows.some((r) => String(r.name) === col);
-  if (!exists) {
-    await client.execute(`ALTER TABLE ${table} ADD COLUMN ${col} ${definition}`);
-  }
-}
+const MIGRATION_SPECS: Array<{ table: string; col: string; definition: string }> = [
+  { table: 'users', col: 'token_version', definition: 'INTEGER NOT NULL DEFAULT 1' },
+  { table: 'categories', col: 'name_en', definition: "TEXT NOT NULL DEFAULT ''" },
+  { table: 'categories', col: 'description_en', definition: "TEXT NOT NULL DEFAULT ''" },
+  { table: 'posts', col: 'title_en', definition: "TEXT NOT NULL DEFAULT ''" },
+  { table: 'posts', col: 'excerpt_en', definition: "TEXT NOT NULL DEFAULT ''" },
+  { table: 'posts', col: 'blocks_en', definition: "TEXT NOT NULL DEFAULT '[]'" },
+  { table: 'projects', col: 'title_en', definition: "TEXT NOT NULL DEFAULT ''" },
+  { table: 'projects', col: 'role_en', definition: "TEXT NOT NULL DEFAULT ''" },
+  { table: 'projects', col: 'period_en', definition: "TEXT NOT NULL DEFAULT ''" },
+  { table: 'projects', col: 'summary_en', definition: "TEXT NOT NULL DEFAULT ''" },
+];
 
 export async function getOrCreateSessionSecret(env?: RuntimeEnv): Promise<string> {
   if (cachedSessionSecret) return cachedSessionSecret;
@@ -281,40 +294,49 @@ export async function getOrCreateSessionSecret(env?: RuntimeEnv): Promise<string
 
 export const DEFAULT_SOCIAL_LINKS: SocialPlatformLink[] = [
   {
-    id: 'telegram',
-    label: 'تلگرام',
-    labelEn: 'Telegram',
-    handle: '@mbnd1224',
-    url: 'https://t.me/mbnd1224',
-    iconKey: 'telegram',
+    id: 'github',
+    label: 'گیت‌هاب',
+    labelEn: 'GitHub',
+    handle: '@username',
+    url: 'https://github.com',
+    iconKey: 'github',
     enabled: true,
   },
   {
     id: 'email',
     label: 'ایمیل',
     labelEn: 'Email',
-    handle: 'mbnd1224@gmail.com',
-    url: 'mailto:mbnd1224@gmail.com',
+    handle: 'hello@example.com',
+    url: 'mailto:hello@example.com',
     iconKey: 'email',
     enabled: true,
   },
   {
-    id: 'bale',
-    label: 'بله',
-    labelEn: 'Bale',
-    handle: '@mbnd1224',
-    url: 'https://ble.ir/mbnd1224',
-    iconKey: 'bale',
-    enabled: true,
+    id: 'telegram',
+    label: 'تلگرام',
+    labelEn: 'Telegram',
+    handle: '@username',
+    url: 'https://t.me',
+    iconKey: 'telegram',
+    enabled: false,
   },
   {
-    id: 'github',
-    label: 'گیت‌هاب',
-    labelEn: 'GitHub',
-    handle: 'mbndCoder',
-    url: 'https://github.com/mbndCoder',
-    iconKey: 'github',
-    enabled: true,
+    id: 'linkedin',
+    label: 'لینکدین',
+    labelEn: 'LinkedIn',
+    handle: 'username',
+    url: 'https://linkedin.com',
+    iconKey: 'linkedin',
+    enabled: false,
+  },
+  {
+    id: 'x',
+    label: 'ایکس',
+    labelEn: 'X',
+    handle: '',
+    url: 'https://x.com',
+    iconKey: 'x',
+    enabled: false,
   },
   {
     id: 'youtube',
@@ -334,15 +356,6 @@ export const DEFAULT_SOCIAL_LINKS: SocialPlatformLink[] = [
     iconKey: 'instagram',
     enabled: false,
   },
-  {
-    id: 'linkedin',
-    label: 'لینکدین',
-    labelEn: 'LinkedIn',
-    handle: 'mbnd',
-    url: 'https://linkedin.com/in/mbnd',
-    iconKey: 'linkedin',
-    enabled: false,
-  },
 ];
 
 export const DEFAULT_NAV_ITEMS_JSON = JSON.stringify([
@@ -353,10 +366,10 @@ export const DEFAULT_NAV_ITEMS_JSON = JSON.stringify([
 ]);
 
 export const DEFAULT_SETTINGS: SiteSettings = {
-  siteTitle: 'محمدباقر نوری (Mohammad Bagher Nouri) | طراحی سایت، ساخت اپ و اتوماسیون هوش مصنوعی — mbnd.ir',
+  siteTitle: 'پورتفولیو و وبلاگ شخصی | Personal Portfolio & Blog',
   siteDescription:
-    'وب‌سایت رسمی محمدباقر نوری (Mohammad Bagher Nouri / Noori — mbnd.ir): طراحی سایت و ساخت اپلیکیشن با هوش مصنوعی، استقرار ایجنت‌های هوش مصنوعی و اتوماسیون، تعمیر و بهینه‌سازی نرم‌افزاری سیستم‌ها.',
-  brandName: 'Mohammad Bagher',
+    'وب‌سایت شخصی، پورتفولیو و وبلاگ دوزبانه سریع با پنل مدیریت اختصاصی، ویرایشگر بلوکی، سئوی پیشرفته و آماده استقرار روی Cloudflare Workers.',
+  brandName: 'My Portfolio',
   logoImage: '/logo.webp',
   faviconImage: '/favicon.png',
 
@@ -366,45 +379,45 @@ export const DEFAULT_SETTINGS: SiteSettings = {
   heroPosterDesktop: '/poster.webp',
   heroPosterMobile: '/poster-mobile.webp',
 
-  heroTitle: 'سلام! من محمدباقر هستم.',
+  heroTitle: 'سلام! به وب‌سایت من خوش آمدید.',
   heroSubtitle:
-    'اینجا از خودم و چیزایی که یاد می‌گیرم می‌نویسم. طراحی اپ و سایت با هوش مصنوعی، استقرار ایجنت‌ها و اتوماسیون، و تعمیر و بهینه‌سازی نرم‌افزاری سیستم‌ها.',
-  blogSectionTitle: 'نوشته‌ها و تجربه‌ها',
+    'اینجا درباره پروژه‌ها، یادداشت‌های فنی و تجربه‌های عملی‌ام می‌نویسم. تمام بخش‌ها، رنگ‌ها، زبان و محتوای این سایت از پنل مدیریت قابل ویرایش است.',
+  blogSectionTitle: 'نوشته‌ها و یادداشت‌ها',
   blogPageTitle: 'وبلاگ',
   blogPageSubtitle:
-    'یادداشت‌ها و تجربه‌های من درباره هوش مصنوعی، اتوماسیون، اقتصاد و بهینه‌سازی سیستم‌ها.',
+    'مقالات، آموزش‌ها و یادداشت‌های فنی درباره نرم‌افزار، وب، هوش مصنوعی و تجربه‌های روزمره.',
   projectsSectionTitle: 'پروژه‌ها',
-  projectsPageSubtitle: 'مجموعه‌ای از ابزارها، وب‌اپلیکیشن‌ها و تجربه‌های عملی ساخته‌شده.',
+  projectsPageSubtitle: 'مجموعه‌ای از پروژه‌ها، وب‌اپلیکیشن‌ها و ابزارهای ساخته‌شده.',
   aboutTitle: 'درباره من و ارتباط',
   aboutBio:
-    'خوش اومدی! من محمدباقر هستم و علاقه‌مندم چیزهای جدید رو با آزمون و خطا یاد بگیرم؛ از طراحی اپ و سایت با هوش مصنوعی و ساخت ایجنت‌ها و اتوماسیون گرفته تا تعمیر و بهینه‌سازی نرم‌افزاری سیستم‌ها. این فضا یه دفترچه یادداشت شخصی برای به اشتراک گذاشتن همین تجربه‌هاست. اگه حرفی، ایده‌ای یا سوالی داشتی، خوشحال میشم بهم پیام بدی.',
+    'خوش آمدید! این یک فضای شخصی برای معرفی کارها، پروژه‌ها و به اشتراک گذاشتن یادداشت‌ها و تجربه‌هاست. می‌توانید تمام این متن‌ها، لینک‌های ارتباطی و کارت مخاطب را از پنل مدیریت شخصی‌سازی کنید.',
   aboutFocusHeading: 'حوزه‌های فعالیت',
-  aboutFocusText: 'طراحی اپ و سایت با هوش مصنوعی · اتوماسیون و تعمیر نرم‌افزاری سیستم‌ها',
+  aboutFocusText: 'توسعه وب و اپلیکیشن · طراحی محصول · اتوماسیون و بهینه‌سازی سیستم‌ها',
   aboutConnectHeading: 'راه‌های ارتباطی مستقیم',
   contactFormHeading: 'ارسال پیام مستقیم',
-  contactSuccessMessage: 'پیامت با موفقیت ثبت شد؛ ممنون از ارتباطت!',
+  contactSuccessMessage: 'پیام شما با موفقیت ثبت شد؛ ممنون از ارتباطتان!',
   vcardButtonLabel: 'افزودن به مخاطبین',
-  footerText: '© ۱۴۰۵ Mohammad Bagher',
+  footerText: '© ۱۴۰۵ My Portfolio',
 
-  heroTitleEn: "Hi, I'm Mohammad Bagher.",
+  heroTitleEn: 'Hello! Welcome to my website.',
   heroSubtitleEn:
-    'I share what I build and learn along the way — from AI-assisted apps and websites to agent automation and software troubleshooting.',
+    'I share my projects, technical notes, and hands-on experiments here. Every section, theme color, language, and block is customizable from the Admin Portal.',
   blogSectionTitleEn: 'Notes & Writing',
   blogPageTitleEn: 'Blog',
   blogPageSubtitleEn:
-    'Field notes and hands-on experiments covering AI tools, automation workflows, economics, and system optimization.',
+    'Articles, tutorials, and field notes on software engineering, web architecture, and practical experiments.',
   projectsSectionTitleEn: 'Projects',
-  projectsPageSubtitleEn: 'Selected apps, tools, and practical experiments I have built.',
+  projectsPageSubtitleEn: 'Selected apps, tools, and practical projects I have built.',
   aboutTitleEn: 'About & Contact',
   aboutBioEn:
-    "Welcome! I'm Mohammad Bagher. I enjoy learning by building — designing apps and websites with AI, deploying practical automation agents, and troubleshooting and optimizing software systems. This site is my personal notebook for sharing what works. Feel free to drop me a message anytime.",
-  aboutFocusHeadingEn: 'What I Focus On',
-  aboutFocusTextEn: 'AI-Assisted Web & App Design · Agent Automation · Software Troubleshooting',
+    'Welcome! This is a personal space for sharing selected projects, technical notes, and direct ways to get in touch. You can customize every section, link, and vCard detail directly from the Admin Portal.',
+  aboutFocusHeadingEn: 'Focus Areas',
+  aboutFocusTextEn: 'Web & App Development · Product Engineering · Automation & Optimization',
   aboutConnectHeadingEn: 'Direct Channels',
   contactFormHeadingEn: 'Send a Direct Message',
-  contactSuccessMessageEn: 'Message received — thanks for reaching out!',
+  contactSuccessMessageEn: 'Message received — thank you for reaching out!',
   vcardButtonLabelEn: 'Save Contact',
-  footerTextEn: '© 2026 Mohammad Bagher',
+  footerTextEn: '© 2026 My Portfolio',
 
   navItemsJson: DEFAULT_NAV_ITEMS_JSON,
   showHeroSection: 'true',
@@ -417,8 +430,8 @@ export const DEFAULT_SETTINGS: SiteSettings = {
   shareEnabled: 'true',
   shareHeading: 'اشتراک‌گذاری این نوشته',
   shareHeadingEn: 'Share this article',
-  shareSubtitle: 'اگر این مطلب برات مفید بود، می‌توانی با دوستانت به اشتراک بگذاری.',
-  shareSubtitleEn: 'Found this helpful? Pass it along to someone who might enjoy it.',
+  shareSubtitle: 'اگر این مطلب مفید بود، می‌توانید آن را با دوستانتان به اشتراک بگذارید.',
+  shareSubtitleEn: 'Found this helpful? Share it with someone who might enjoy it.',
   shareCopyEnabled: 'true',
   shareTelegramEnabled: 'true',
   shareWhatsappEnabled: 'true',
@@ -426,7 +439,7 @@ export const DEFAULT_SETTINGS: SiteSettings = {
   shareNativeEnabled: 'true',
 
   themeMode: 'dark',
-  allowThemeToggle: 'false',
+  allowThemeToggle: 'true',
   accentColor: '#FF502B',
   darkBgColor: '#0E0E0E',
   darkSurfaceColor: '#121212',
@@ -435,18 +448,18 @@ export const DEFAULT_SETTINGS: SiteSettings = {
   lightSurfaceColor: '#FFFFFF',
   lightInkColor: '#181615',
   defaultLanguage: 'fa',
-  allowLanguageToggle: 'false',
+  allowLanguageToggle: 'true',
 
-  email: 'mbnd1224@gmail.com',
-  telegramHandle: '@mbnd1224',
-  telegramUrl: 'https://t.me/mbnd1224',
+  email: 'hello@example.com',
+  telegramHandle: '',
+  telegramUrl: '',
   vcardEnabled: 'true',
-  vcardFullName: 'محمدباقر نوری',
-  vcardOrg: 'Mohammad Bagher',
-  vcardTitle: 'طراحی اپ و سایت با هوش مصنوعی · اتوماسیون و تعمیر نرم‌افزاری سیستم‌ها',
-  vcardNote: 'تلگرام و بله: @mbnd1224 | گیت‌هاب: github.com/mbndCoder',
+  vcardFullName: 'Your Name',
+  vcardOrg: 'My Portfolio',
+  vcardTitle: 'Software Developer & Creator',
+  vcardNote: '',
   vcardPhone: '',
-  vcardWebsite: 'https://mbnd.ir',
+  vcardWebsite: '',
   vcardAvatar: '/vcard-avatar.jpg',
   vcardExtraFieldsJson: '[]',
   socialLinksJson: JSON.stringify(DEFAULT_SOCIAL_LINKS),
@@ -459,7 +472,7 @@ function createSamplePostBlocks(): ContentBlock[] {
     {
       id: 'sample_intro',
       type: 'paragraph',
-      text: 'این نوشته یک **نمونه جامع** از تمام قابلیت‌های ویرایشگر وبلاگ است. هر زمان خواستی می‌توانی از داخل پنل مدیریت این نوشته را *ویرایش* یا ==به‌صورت دائمی حذف== کنی. همچنین می‌توانی `کد درون‌خطی` و [لینک مستقیم به گیت‌هاب](https://github.com/mbndCoder) داخل متن بگذاری.',
+      text: 'این نوشته یک **نمونه جامع** از تمام قابلیت‌های ویرایشگر وبلاگ است. هر زمان بخواهید می‌توانید از داخل پنل مدیریت این نوشته را *ویرایش* یا ==به‌صورت دائمی حذف== کنید. همچنین می‌توانید `کد درون‌خطی` و [لینک خارجی](https://example.com) داخل متن قرار دهید.',
     },
     {
       id: 'sample_h2_media',
@@ -495,7 +508,7 @@ function createSamplePostBlocks(): ContentBlock[] {
       id: 'sample_card_flame',
       type: 'card',
       title: 'کارت نکته برجسته (Flame)',
-      body: 'با بلوک کارت می‌توانی نکات مهم، چک‌لیست‌ها یا خلاصه مطلب را با **تأکید رنگی** وسط نوشته نمایش بدهی. برای ویدیوهای آنلاین کافی است لینک [آپارات](https://www.aparat.com) یا [یوتیوب](https://www.youtube.com) را داخل بلوک ویدیو قرار دهی.',
+      body: 'با بلوک کارت می‌توانید نکات مهم، چک‌لیست‌ها یا خلاصه مطلب را با **تأکید رنگی** وسط نوشته نمایش دهید.',
       accent: 'flame',
     },
     {
@@ -511,22 +524,22 @@ function createSamplePostBlocks(): ContentBlock[] {
       ordered: false,
       items: [
         'قالب‌بندی درون‌خطی: **بولد**، *ایتالیک*، ==هایلایت== و `کد درون‌خطی`',
-        'جابه‌جایی ترتیب بلوک‌ها با کشیدن و رها کردن (Drag & Drop)',
-        'دستیار هوش مصنوعی داخلی پنل مدیریت برای نگارش، زیباسازی و پر کردن فیلدها',
+        'جابه‌جایی ترتیب بلوک‌ها با دستگیره کشیدن و رها کردن (Drag & Drop)',
+        'پشتیبان‌گیری کامل (Import/Export)، لاگ خطاها و دستیار هوش مصنوعی اختیاری',
       ],
     },
     {
       id: 'sample_embed',
       type: 'embed',
-      title: 'مخزن پروژه‌ها در GitHub',
-      url: 'https://github.com/mbndCoder',
-      description: 'کدها، ابزارها و آزمایش‌های منتشرشده توسط محمدباقر نوری.',
+      title: 'مستندات و نمونه لینک خارجی',
+      url: 'https://example.com',
+      description: 'نمونه کارت لینک خارجی برای معرفی ابزارها، مخازن کد یا منابع مفید.',
     },
     {
       id: 'sample_button',
       type: 'button',
-      label: 'ارتباط در پیام‌رسان بله',
-      url: 'https://ble.ir/mbnd1224',
+      label: 'مشاهده پروژه‌ها',
+      url: '/projects',
       variant: 'primary',
     },
     {
@@ -538,13 +551,13 @@ function createSamplePostBlocks(): ContentBlock[] {
       id: 'sample_code',
       type: 'code',
       language: 'bash',
-      code: '# ساخت و اجرای نسخه نهایی روی سرور\nnpm run build && npm run start',
+      code: '# Build and run locally\nnpm run build && npm run start',
     },
     {
       id: 'sample_quote',
       type: 'quote',
       text: 'بهترین راه یادگیری هر ابزار جدید، ساختن یک پروژه واقعی و حل کردن خطاهای واقعی آن است.',
-      author: 'محمدباقر',
+      author: 'نویسنده',
     },
   ];
 }
@@ -554,7 +567,7 @@ function createSamplePostBlocksEn(): ContentBlock[] {
     {
       id: 'sample_intro',
       type: 'paragraph',
-      text: 'This article is a **complete showcase** of every capability built into the block editor. Whenever you want, you can *edit* or ==permanently delete== this sample from the Admin Portal. You can also mix `inline code` and [direct links to GitHub](https://github.com/mbndCoder) seamlessly.',
+      text: 'This article is a **complete showcase** of every capability built into the block editor. Whenever you want, you can *edit* or ==permanently delete== this sample from the Admin Portal. You can also mix `inline code` and [external links](https://example.com) seamlessly.',
     },
     {
       id: 'sample_h2_media',
@@ -590,7 +603,7 @@ function createSamplePostBlocksEn(): ContentBlock[] {
       id: 'sample_card_flame',
       type: 'card',
       title: 'Highlighted Note Card (Flame)',
-      body: 'Use callout cards to spotlight key takeaways, checklists, or summaries with **accent styling**. For hosted videos, simply paste an [Aparat](https://www.aparat.com) or [YouTube](https://www.youtube.com) link into a video block.',
+      body: 'Use callout cards to spotlight key takeaways, checklists, or summaries with **accent styling**.',
       accent: 'flame',
     },
     {
@@ -606,22 +619,22 @@ function createSamplePostBlocksEn(): ContentBlock[] {
       ordered: false,
       items: [
         'Inline rich formatting: **bold**, *italic*, ==highlight==, and `inline code`',
-        'Drag-and-drop block reordering directly inside the editor',
-        'Optional built-in AI assistant for drafting, polishing, and natural Persian-to-English translation',
+        'Drag-and-drop block reordering using the block handle',
+        'Full Backup Import/Export, Site Logs, and optional AI writing assistant',
       ],
     },
     {
       id: 'sample_embed',
       type: 'embed',
-      title: 'Projects Repository on GitHub',
-      url: 'https://github.com/mbndCoder',
-      description: 'Open-source tools, web apps, and practical experiments by Mohammad Bagher.',
+      title: 'Sample Resource Link Card',
+      url: 'https://example.com',
+      description: 'Embed external repositories, documentation, or helpful references cleanly.',
     },
     {
       id: 'sample_button',
       type: 'button',
-      label: 'Connect on Bale Messenger',
-      url: 'https://ble.ir/mbnd1224',
+      label: 'Explore Projects',
+      url: '/projects',
       variant: 'primary',
     },
     {
@@ -639,7 +652,7 @@ function createSamplePostBlocksEn(): ContentBlock[] {
       id: 'sample_quote',
       type: 'quote',
       text: 'The best way to learn any new tool is to build a real project and solve its real-world bugs.',
-      author: 'Mohammad Bagher',
+      author: 'Author',
     },
   ];
 }
@@ -648,26 +661,34 @@ async function runDatabaseInit(): Promise<void> {
   const client = getLibsqlClient();
   const db = getDb();
 
-  // 1. Create tables if missing
-  for (const sql of SCHEMA_STATEMENTS) {
-    await client.execute(sql);
-  }
+  // 1. Create tables in ONE single batched request (Cloudflare Workers subrequest friendly)
+  await client.batch(SCHEMA_STATEMENTS, 'write');
 
-  // 2. Safe idempotent column migrations for existing databases
-  await ensureColumn(client, 'users', 'token_version', 'INTEGER NOT NULL DEFAULT 1');
-  await ensureColumn(client, 'categories', 'name_en', "TEXT NOT NULL DEFAULT ''");
-  await ensureColumn(client, 'categories', 'description_en', "TEXT NOT NULL DEFAULT ''");
-  await ensureColumn(client, 'posts', 'title_en', "TEXT NOT NULL DEFAULT ''");
-  await ensureColumn(client, 'posts', 'excerpt_en', "TEXT NOT NULL DEFAULT ''");
-  await ensureColumn(client, 'posts', 'blocks_en', "TEXT NOT NULL DEFAULT '[]'");
-  await ensureColumn(client, 'projects', 'title_en', "TEXT NOT NULL DEFAULT ''");
-  await ensureColumn(client, 'projects', 'role_en', "TEXT NOT NULL DEFAULT ''");
-  await ensureColumn(client, 'projects', 'period_en', "TEXT NOT NULL DEFAULT ''");
-  await ensureColumn(client, 'projects', 'summary_en', "TEXT NOT NULL DEFAULT ''");
+  // 2. Check missing columns across all tables in ONE single batched read
+  const tablesToCheck = Array.from(new Set(MIGRATION_SPECS.map((m) => m.table)));
+  const pragmaResults = await client.batch(
+    tablesToCheck.map((table) => `PRAGMA table_info(${table})`),
+    'read',
+  );
+  const columnsByTable = new Map<string, Set<string>>();
+  tablesToCheck.forEach((table, idx) => {
+    const rows = pragmaResults[idx]?.rows || [];
+    columnsByTable.set(table, new Set(rows.map((r) => String(r.name))));
+  });
+
+  const alterStmts: string[] = [];
+  for (const spec of MIGRATION_SPECS) {
+    if (!columnsByTable.get(spec.table)?.has(spec.col)) {
+      alterStmts.push(`ALTER TABLE ${spec.table} ADD COLUMN ${spec.col} ${spec.definition}`);
+    }
+  }
+  if (alterStmts.length > 0) {
+    await client.batch(alterStmts, 'write');
+  }
 
   const now = new Date().toISOString();
 
-  // 3. Seed missing settings keys in a single batch where possible
+  // 3. Seed missing settings keys in a single multi-row insert
   const existingSettingsRows = await db.select({ key: settings.key }).from(settings);
   const existingKeys = new Set(existingSettingsRows.map((r) => r.key));
   const missingEntries = Object.entries(DEFAULT_SETTINGS).filter(([k]) => !existingKeys.has(k));
@@ -750,32 +771,32 @@ async function runDatabaseInit(): Promise<void> {
     if (existingProjects.length === 0) {
       await db.insert(projectsTable).values([
         {
-          title: 'masafig.ai.studio',
-          titleEn: 'masafig.ai.studio',
-          role: 'وب‌اپلیکیشن',
-          roleEn: 'Web Application',
-          period: 'AI Studio',
-          periodEn: 'AI Studio',
-          summary: 'نمونه پروژه واقعی طراحی و پیاده‌سازی‌شده با کمک هوش مصنوعی روی AI Studio.',
-          summaryEn: 'A real-world web application designed and built with AI assistance.',
-          stack: JSON.stringify(['AI Studio', 'Web App']),
-          url: 'https://masafig.ai.studio',
-          featured: 1,
-          sortOrder: 1,
-        },
-        {
-          title: 'وب‌سایت شخصی و وبلاگ',
-          titleEn: 'Personal Portfolio & Serverless Blog',
-          role: 'طراحی و توسعه',
+          title: 'وب‌سایت شخصی و وبلاگ ابری',
+          titleEn: 'Personal Portfolio & Edge CMS',
+          role: 'طراحی و توسعه فول‌استک',
           roleEn: 'Design & Full-Stack Dev',
           period: '۱۴۰۵',
           periodEn: '2026',
           summary:
-            'پورتفولیو و وبلاگ شخصی با دیتابیس libSQL/Turso، ذخیره رسانه کلودیناری و پنل مدیریت سفارشی.',
+            'پورتفولیو و وبلاگ دوزبانه با Cloudflare Workers، دیتابیس Turso/libSQL، ذخیره رسانه کلودیناری و پنل مدیریت اختصاصی.',
           summaryEn:
-            'Serverless portfolio and block-based blog powered by Turso libSQL, Cloudinary media, and a custom bilingual CMS.',
-          stack: JSON.stringify(['TypeScript', 'React', 'Turso']),
+            'Bilingual edge portfolio and block-based blog powered by Cloudflare Workers, Turso libSQL, Cloudinary media, and a custom CMS.',
+          stack: JSON.stringify(['React', 'TypeScript', 'Hono', 'Turso']),
           url: '/',
+          featured: 1,
+          sortOrder: 1,
+        },
+        {
+          title: 'پروژه نمونه وب‌اپلیکیشن',
+          titleEn: 'Sample Web Application',
+          role: 'وب‌اپلیکیشن',
+          roleEn: 'Web Application',
+          period: '۱۴۰۵',
+          periodEn: '2026',
+          summary: 'نمونه کارت پروژه قابل ویرایش یا حذف از پنل مدیریت.',
+          summaryEn: 'A sample project card that you can edit or delete from the Admin Portal.',
+          stack: JSON.stringify(['TypeScript', 'Tailwind CSS']),
+          url: 'https://example.com',
           featured: 1,
           sortOrder: 2,
         },
@@ -923,19 +944,20 @@ export async function getSettings(): Promise<SiteSettings> {
 
 export async function updateSettings(partial: Partial<SiteSettings>): Promise<SiteSettings> {
   await ensureDbInitialized();
-  const db = getDb();
+  const client = getLibsqlClient();
   const now = new Date().toISOString();
   const allowedKeys = Object.keys(DEFAULT_SETTINGS) as Array<keyof SiteSettings>;
+  const statements: Array<{ sql: string; args: Array<string> }> = [];
   for (const key of allowedKeys) {
     if (typeof partial[key] === 'string') {
-      await db
-        .insert(settings)
-        .values({ key, value: partial[key] as string, updatedAt: now })
-        .onConflictDoUpdate({
-          target: settings.key,
-          set: { value: partial[key] as string, updatedAt: now },
-        });
+      statements.push({
+        sql: 'INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
+        args: [key, partial[key] as string, now],
+      });
     }
+  }
+  if (statements.length > 0) {
+    await client.batch(statements, 'write');
   }
   return getSettings();
 }
@@ -946,24 +968,6 @@ const AI_MODEL_KEY = '_ai_model';
 const AI_BASE_URL_KEY = '_ai_base_url';
 const AI_API_KEY_ENC = '_ai_api_key_enc';
 
-async function getInternalSetting(key: string): Promise<string> {
-  await ensureDbInitialized();
-  const [row] = await getDb().select().from(settings).where(eq(settings.key, key)).limit(1);
-  return row?.value ?? '';
-}
-
-async function setInternalSetting(key: string, value: string): Promise<void> {
-  await ensureDbInitialized();
-  const now = new Date().toISOString();
-  await getDb()
-    .insert(settings)
-    .values({ key, value, updatedAt: now })
-    .onConflictDoUpdate({
-      target: settings.key,
-      set: { value, updatedAt: now },
-    });
-}
-
 export interface ResolvedAiConfig {
   provider: AiProviderType;
   model: string;
@@ -973,32 +977,35 @@ export interface ResolvedAiConfig {
   envOpenAiKey: string;
 }
 
-const LEGACY_GEMINI_MODELS = new Set([
-  'gemini-1.5-flash',
-  'gemini-1.5-pro',
-  'gemini-2.0-flash',
-  'gemini-2.5-flash',
-  'gemini-3-flash-preview',
-]);
-
 export async function getAiConfigResolved(): Promise<ResolvedAiConfig> {
-  const [rawProvider, savedModelRaw, baseUrlRaw, encKey, secret] = await Promise.all([
-    getInternalSetting(AI_PROVIDER_KEY),
-    getInternalSetting(AI_MODEL_KEY),
-    getInternalSetting(AI_BASE_URL_KEY),
-    getInternalSetting(AI_API_KEY_ENC),
+  await ensureDbInitialized();
+  const [rows, secret] = await Promise.all([
+    getDb()
+      .select()
+      .from(settings)
+      .where(
+        inArray(settings.key, [
+          AI_PROVIDER_KEY,
+          AI_MODEL_KEY,
+          AI_BASE_URL_KEY,
+          AI_API_KEY_ENC,
+        ]),
+      ),
     getOrCreateSessionSecret(),
   ]);
 
+  const map = new Map<string, string>();
+  for (const row of rows) {
+    map.set(row.key, row.value);
+  }
+
+  const rawProvider = map.get(AI_PROVIDER_KEY) ?? '';
   const provider: AiProviderType =
     rawProvider === 'openai_compatible' ? 'openai_compatible' : 'gemini';
-  const defaultModel = provider === 'gemini' ? 'gemini-4-hydrogen' : 'gpt-4.1-mini';
-  const savedModel = savedModelRaw.trim();
-  const model =
-    !savedModel || (provider === 'gemini' && LEGACY_GEMINI_MODELS.has(savedModel))
-      ? defaultModel
-      : savedModel;
-  const baseUrl = baseUrlRaw.trim();
+  // Security & public-readiness: never pre-bind a default model or key.
+  const model = (map.get(AI_MODEL_KEY) ?? '').trim();
+  const baseUrl = (map.get(AI_BASE_URL_KEY) ?? '').trim();
+  const encKey = map.get(AI_API_KEY_ENC) ?? '';
   const customApiKey = encKey ? decryptSecret(encKey, secret) : '';
 
   return {
@@ -1038,21 +1045,36 @@ export async function updateAiConfig(input: {
   apiKey?: string;
   clearCustomApiKey?: boolean;
 }): Promise<AiConfigPublic> {
+  await ensureDbInitialized();
+  const client = getLibsqlClient();
+  const now = new Date().toISOString();
+  const statements: Array<{ sql: string; args: Array<string> }> = [];
+  const pushUpsert = (key: string, value: string) => {
+    statements.push({
+      sql: 'INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
+      args: [key, value, now],
+    });
+  };
+
   if (input.provider === 'gemini' || input.provider === 'openai_compatible') {
-    await setInternalSetting(AI_PROVIDER_KEY, input.provider);
+    pushUpsert(AI_PROVIDER_KEY, input.provider);
   }
   if (typeof input.model === 'string') {
-    await setInternalSetting(AI_MODEL_KEY, input.model.trim());
+    pushUpsert(AI_MODEL_KEY, input.model.trim());
   }
   if (typeof input.baseUrl === 'string') {
-    await setInternalSetting(AI_BASE_URL_KEY, input.baseUrl.trim());
+    pushUpsert(AI_BASE_URL_KEY, input.baseUrl.trim());
   }
   if (input.clearCustomApiKey) {
-    await setInternalSetting(AI_API_KEY_ENC, '');
+    pushUpsert(AI_API_KEY_ENC, '');
   } else if (typeof input.apiKey === 'string' && input.apiKey.trim()) {
     const secret = await getOrCreateSessionSecret();
     const encrypted = encryptSecret(input.apiKey.trim(), secret);
-    await setInternalSetting(AI_API_KEY_ENC, encrypted);
+    pushUpsert(AI_API_KEY_ENC, encrypted);
+  }
+
+  if (statements.length > 0) {
+    await client.batch(statements, 'write');
   }
   return getAiConfigPublic();
 }
@@ -1178,18 +1200,16 @@ export async function upsertCategory(input: {
 
 export async function reorderCategories(orderedIds: number[]): Promise<CategoryItem[]> {
   await ensureDbInitialized();
-  const db = getDb();
-  await db.transaction(async (tx) => {
-    for (let idx = 0; idx < orderedIds.length; idx++) {
-      const id = orderedIds[idx];
-      if (Number.isInteger(id) && id > 0) {
-        await tx
-          .update(categories)
-          .set({ sortOrder: idx + 1 })
-          .where(eq(categories.id, id));
-      }
-    }
-  });
+  const statements = orderedIds
+    .map((id, idx) =>
+      Number.isInteger(id) && id > 0
+        ? { sql: 'UPDATE categories SET sort_order = ? WHERE id = ?', args: [idx + 1, id] }
+        : null,
+    )
+    .filter((s): s is { sql: string; args: number[] } => Boolean(s));
+  if (statements.length > 0) {
+    await getLibsqlClient().batch(statements, 'write');
+  }
   return listCategories();
 }
 
@@ -1437,18 +1457,16 @@ export async function upsertProject(
 
 export async function reorderProjects(orderedIds: number[]): Promise<ProjectItem[]> {
   await ensureDbInitialized();
-  const db = getDb();
-  await db.transaction(async (tx) => {
-    for (let idx = 0; idx < orderedIds.length; idx++) {
-      const id = orderedIds[idx];
-      if (Number.isInteger(id) && id > 0) {
-        await tx
-          .update(projectsTable)
-          .set({ sortOrder: idx + 1 })
-          .where(eq(projectsTable.id, id));
-      }
-    }
-  });
+  const statements = orderedIds
+    .map((id, idx) =>
+      Number.isInteger(id) && id > 0
+        ? { sql: 'UPDATE projects SET sort_order = ? WHERE id = ?', args: [idx + 1, id] }
+        : null,
+    )
+    .filter((s): s is { sql: string; args: number[] } => Boolean(s));
+  if (statements.length > 0) {
+    await getLibsqlClient().batch(statements, 'write');
+  }
   return listProjects();
 }
 
@@ -1761,3 +1779,300 @@ export async function bumpAdminTokenVersion(username: string): Promise<boolean> 
     .where(eq(users.id, row.id));
   return true;
 }
+
+// ==================== SYSTEM & ERROR LOGS ====================
+const MAX_SYSTEM_LOGS = 500;
+
+export async function writeSystemLog(input: {
+  level?: SystemLogLevel;
+  source?: SystemLogSource;
+  method?: string;
+  path?: string;
+  status?: number;
+  message: string;
+  details?: unknown;
+}): Promise<void> {
+  try {
+    await ensureDbInitialized();
+    const now = new Date().toISOString();
+    const level = normalizeLogLevel(input.level);
+    const source = normalizeLogSource(input.source);
+    const method = (input.method || '').toUpperCase().slice(0, 12);
+    const reqPath = sanitizeLogText(input.path || '', 300);
+    const status =
+      typeof input.status === 'number' && Number.isFinite(input.status)
+        ? Math.trunc(input.status)
+        : 0;
+    const message = sanitizeLogText(input.message, 500) || 'Event recorded';
+    const details = sanitizeLogText(input.details ?? '', 3000);
+
+    // Insert + prune oldest logs beyond MAX_SYSTEM_LOGS in ONE single batched request
+    await getLibsqlClient().batch(
+      [
+        {
+          sql: 'INSERT INTO system_logs (level, source, method, path, status, message, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+          args: [level, source, method, reqPath, status, message, details, now],
+        },
+        {
+          sql: 'DELETE FROM system_logs WHERE id NOT IN (SELECT id FROM system_logs ORDER BY id DESC LIMIT ?)',
+          args: [MAX_SYSTEM_LOGS],
+        },
+      ],
+      'write',
+    );
+  } catch {
+    // Logging must never crash a request
+  }
+}
+
+export async function listSystemLogs(filter?: {
+  level?: string;
+  source?: string;
+  q?: string;
+  limit?: number;
+}): Promise<SystemLogsResponse> {
+  await ensureDbInitialized();
+  const rows = await getDb()
+    .select()
+    .from(systemLogs)
+    .orderBy(desc(systemLogs.id))
+    .limit(MAX_SYSTEM_LOGS);
+
+  const counts = { total: rows.length, error: 0, warn: 0, info: 0 };
+  for (const r of rows) {
+    if (r.level === 'error') counts.error += 1;
+    else if (r.level === 'warn') counts.warn += 1;
+    else counts.info += 1;
+  }
+
+  const levelFilter = filter?.level && filter.level !== 'all' ? filter.level : '';
+  const sourceFilter = filter?.source && filter.source !== 'all' ? filter.source : '';
+  const query = (filter?.q || '').trim().toLowerCase();
+  const limit = Math.min(Math.max(Number(filter?.limit) || 150, 1), MAX_SYSTEM_LOGS);
+
+  const filtered: SystemLogEntry[] = rows
+    .filter((r) => {
+      if (levelFilter && r.level !== levelFilter) return false;
+      if (sourceFilter && r.source !== sourceFilter) return false;
+      if (query) {
+        const hay = `${r.message} ${r.details} ${r.path} ${r.source} ${r.status}`.toLowerCase();
+        if (!hay.includes(query)) return false;
+      }
+      return true;
+    })
+    .slice(0, limit)
+    .map((r) => ({
+      id: r.id,
+      level: normalizeLogLevel(r.level),
+      source: normalizeLogSource(r.source),
+      method: r.method,
+      path: r.path,
+      status: r.status,
+      message: r.message,
+      details: r.details,
+      createdAt: r.createdAt,
+    }));
+
+  return { logs: filtered, counts };
+}
+
+export async function clearSystemLogs(): Promise<boolean> {
+  await ensureDbInitialized();
+  await getDb().delete(systemLogs);
+  return true;
+}
+
+// ==================== FULL BACKUP EXPORT / IMPORT ====================
+export async function exportFullBackup(): Promise<SiteBackupPayload> {
+  await ensureDbInitialized();
+  const [siteSettings, aiCfg, siteCategories, sitePosts, siteProjects, siteMessages, rawMedia] =
+    await Promise.all([
+      getSettings(),
+      getAiConfigPublic(),
+      listCategories(),
+      listPosts(true),
+      listProjects(),
+      listMessages(),
+      getDb()
+        .select()
+        .from(mediaAssets)
+        .orderBy(desc(mediaAssets.createdAt), desc(mediaAssets.id)),
+    ]);
+
+  return createBackupEnvelope({
+    settings: siteSettings,
+    aiConfig: {
+      provider: aiCfg.provider,
+      model: aiCfg.model,
+      baseUrl: aiCfg.baseUrl,
+    },
+    categories: siteCategories,
+    posts: sitePosts,
+    projects: siteProjects,
+    messages: siteMessages,
+    mediaAssets: rawMedia.map((m) => ({
+      publicId: m.publicId,
+      filename: m.filename,
+      url: m.url,
+      kind: m.kind === 'video' || m.kind === 'audio' || m.kind === 'file' ? m.kind : 'image',
+      resourceType:
+        m.resourceType === 'video' || m.resourceType === 'raw' ? m.resourceType : 'image',
+      sizeBytes: m.sizeBytes,
+      createdAt: m.createdAt,
+    })),
+  });
+}
+
+export async function importFullBackup(
+  rawPayload: unknown,
+  mode: 'replace' | 'merge' = 'replace',
+): Promise<{
+  restored: {
+    settings: number;
+    categories: number;
+    posts: number;
+    projects: number;
+    messages: number;
+    mediaAssets: number;
+  };
+}> {
+  await ensureDbInitialized();
+  const allowedSettingKeys = new Set(Object.keys(DEFAULT_SETTINGS));
+  const normalized = validateAndNormalizeBackupPayload(rawPayload, allowedSettingKeys);
+  const now = new Date().toISOString();
+
+  const statements: Array<{ sql: string; args?: (string | number | null)[] }> = [];
+
+  if (mode === 'replace') {
+    statements.push({ sql: 'DELETE FROM categories' });
+    statements.push({ sql: 'DELETE FROM posts' });
+    statements.push({ sql: 'DELETE FROM projects' });
+    statements.push({ sql: 'DELETE FROM messages' });
+    statements.push({ sql: 'DELETE FROM media_assets' });
+  }
+
+  // Settings (strict allowlisted keys only; internal secrets untouched)
+  const settingEntries = Object.entries(normalized.settings);
+  for (const [key, value] of settingEntries) {
+    if (typeof value === 'string') {
+      statements.push({
+        sql: 'INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
+        args: [key, value, now],
+      });
+    }
+  }
+
+  // Non-secret AI config metadata (never touches encrypted API key)
+  if (normalized.aiConfig) {
+    statements.push({
+      sql: 'INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
+      args: [AI_PROVIDER_KEY, normalized.aiConfig.provider, now],
+    });
+    statements.push({
+      sql: 'INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
+      args: [AI_MODEL_KEY, normalized.aiConfig.model, now],
+    });
+    statements.push({
+      sql: 'INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
+      args: [AI_BASE_URL_KEY, normalized.aiConfig.baseUrl, now],
+    });
+  }
+
+  // Categories
+  for (const cat of normalized.categories) {
+    statements.push({
+      sql: 'INSERT INTO categories (name, name_en, slug, description, description_en, sort_order) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(slug) DO UPDATE SET name = excluded.name, name_en = excluded.name_en, description = excluded.description, description_en = excluded.description_en, sort_order = excluded.sort_order',
+      args: [cat.name, cat.nameEn, cat.slug, cat.description, cat.descriptionEn, cat.sortOrder],
+    });
+  }
+
+  // Posts
+  for (const post of normalized.posts) {
+    statements.push({
+      sql: 'INSERT INTO posts (title, title_en, slug, excerpt, excerpt_en, category, cover_image, blocks, blocks_en, published, reading_minutes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(slug) DO UPDATE SET title = excluded.title, title_en = excluded.title_en, excerpt = excluded.excerpt, excerpt_en = excluded.excerpt_en, category = excluded.category, cover_image = excluded.cover_image, blocks = excluded.blocks, blocks_en = excluded.blocks_en, published = excluded.published, reading_minutes = excluded.reading_minutes, updated_at = excluded.updated_at',
+      args: [
+        post.title,
+        post.titleEn,
+        post.slug,
+        post.excerpt,
+        post.excerptEn,
+        post.category,
+        post.coverImage,
+        JSON.stringify(post.blocks),
+        JSON.stringify(post.blocksEn),
+        post.published ? 1 : 0,
+        post.readingMinutes,
+        post.createdAt,
+        post.updatedAt,
+      ],
+    });
+  }
+
+  // Projects
+  for (const proj of normalized.projects) {
+    statements.push({
+      sql: 'INSERT INTO projects (title, title_en, role, role_en, period, period_en, summary, summary_en, stack, url, featured, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      args: [
+        proj.title,
+        proj.titleEn,
+        proj.role,
+        proj.roleEn,
+        proj.period,
+        proj.periodEn,
+        proj.summary,
+        proj.summaryEn,
+        JSON.stringify(proj.stack),
+        proj.url,
+        proj.featured ? 1 : 0,
+        proj.sortOrder,
+      ],
+    });
+  }
+
+  // Messages
+  for (const msg of normalized.messages) {
+    statements.push({
+      sql: 'INSERT INTO messages (name, contact, subject, message, read, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      args: [msg.name, msg.contact, msg.subject, msg.message, msg.read ? 1 : 0, msg.createdAt],
+    });
+  }
+
+  // Media Assets
+  for (const media of normalized.mediaAssets) {
+    statements.push({
+      sql: 'INSERT INTO media_assets (public_id, filename, url, kind, resource_type, size_bytes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(public_id) DO UPDATE SET filename = excluded.filename, url = excluded.url, kind = excluded.kind, resource_type = excluded.resource_type, size_bytes = excluded.size_bytes',
+      args: [
+        media.publicId,
+        media.filename,
+        media.url,
+        media.kind,
+        media.resourceType,
+        media.sizeBytes,
+        media.createdAt,
+      ],
+    });
+  }
+
+  // Mark seed flag so initial sample data does not re-seed over intentionally empty restored tables
+  statements.push({
+    sql: 'INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
+    args: [SEED_FLAG_KEY, '1', now],
+  });
+
+  if (statements.length > 0) {
+    // Execute in ONE atomic batch (1 HTTP subrequest on Cloudflare Workers!)
+    await getLibsqlClient().batch(statements, 'write');
+  }
+
+  return {
+    restored: {
+      settings: settingEntries.length,
+      categories: normalized.categories.length,
+      posts: normalized.posts.length,
+      projects: normalized.projects.length,
+      messages: normalized.messages.length,
+      mediaAssets: normalized.mediaAssets.length,
+    },
+  };
+}
+

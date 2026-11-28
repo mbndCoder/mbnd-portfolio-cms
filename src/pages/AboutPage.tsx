@@ -21,7 +21,7 @@ export function AboutPage({ settings, lang }: AboutPageProps) {
   );
 
   useEffect(() => {
-    document.title = `${loc.aboutTitle} | ${settings.brandName || 'Mohammad Bagher'}`;
+    document.title = `${loc.aboutTitle} | ${settings.brandName || 'My Portfolio'}`;
   }, [loc.aboutTitle, settings.brandName]);
 
   return (
@@ -43,8 +43,8 @@ export function AboutPage({ settings, lang }: AboutPageProps) {
               <h1 className="text-2xl font-extrabold text-[var(--ink)]">{loc.aboutTitle}</h1>
               <p className="mt-1 text-xs text-[var(--flame)]">
                 {lang === 'en'
-                  ? settings.brandName || 'Mohammad Bagher'
-                  : settings.vcardFullName || 'محمدباقر نوری'}
+                  ? settings.brandName || 'My Portfolio'
+                  : settings.vcardFullName || settings.brandName || 'My Portfolio'}
               </p>
             </div>
           </div>

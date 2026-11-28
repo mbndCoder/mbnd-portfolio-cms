@@ -111,7 +111,7 @@ export function AdminAiAssistant({
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
-  const isKeyConfigured = Boolean(aiConfig?.hasCustomApiKey);
+  const isKeyConfigured = Boolean(aiConfig?.hasCustomApiKey && aiConfig?.model?.trim());
 
   useEffect(() => {
     if (open && scrollRef.current) {
@@ -327,8 +327,8 @@ export function AdminAiAssistant({
                 </div>
                 <p className="truncate text-[10px] text-[var(--ink-faint)] tabular-nums">
                   {isEn
-                    ? `Reading ${nonEmptyBlocksCount} block(s) · ${aiConfig?.model || 'gemini'}`
-                    : `خواندن ${nonEmptyBlocksCount} بلوک فعال · ${aiConfig?.model || 'gemini'}`}
+                    ? `Reading ${nonEmptyBlocksCount} block(s) · ${aiConfig?.model?.trim() || 'Model not set'}`
+                    : `خواندن ${nonEmptyBlocksCount} بلوک فعال · ${aiConfig?.model?.trim() || 'مدل تنظیم نشده'}`}
                 </p>
               </div>
             </div>
@@ -382,13 +382,13 @@ export function AdminAiAssistant({
             </div>
           </div>
 
-          {/* API Key notice if not configured */}
+          {/* API Key / Model notice if not configured */}
           {!isKeyConfigured && (
             <div className="flex items-center justify-between gap-2 border-b border-[var(--flame-border)] bg-[var(--flame-tint)] px-3.5 py-2 text-[11px] text-[var(--ink)]">
               <span className="truncate">
                 {isEn
-                  ? 'Add your AI API key in Settings to activate.'
-                  : 'کلید API را در تنظیمات وارد کن تا فعال شود.'}
+                  ? 'Set your AI model and API key in AI Settings to activate.'
+                  : 'مدل و کلید API را در تنظیمات هوش مصنوعی وارد کن تا فعال شود.'}
               </span>
               <button
                 type="button"
@@ -398,7 +398,7 @@ export function AdminAiAssistant({
                 }}
                 className="shrink-0 cursor-pointer rounded-lg bg-[var(--flame)] px-2.5 py-1 text-[10px] font-bold text-[var(--flame-ink)]"
               >
-                {isEn ? 'Set Key' : 'تنظیم کلید'}
+                {isEn ? 'Configure' : 'تنظیمات AI'}
               </button>
             </div>
           )}

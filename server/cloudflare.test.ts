@@ -14,6 +14,12 @@ import {
   UploadValidationError,
 } from './uploads.ts';
 import { normalizeAiPatch } from './ai.ts';
+import {
+  BACKUP_FORMAT_ID,
+  BackupValidationError,
+  validateAndNormalizeBackupPayload,
+} from './backup.ts';
+import { inferLogSourceFromPath, sanitizeLogText } from './logs.ts';
 import type { AssetsBinding, RuntimeEnv } from './env.ts';
 
 function createMockAssets(): AssetsBinding {
@@ -207,10 +213,10 @@ test('Hono Worker app.fetch handles public API, SEO, vCard, SSR HTML, and Admin 
     categories: unknown[];
     projects: unknown[];
   };
-  assert.equal(siteJson.settings.brandName, 'Mohammad Bagher');
+  assert.equal(siteJson.settings.brandName, 'My Portfolio');
   assert.ok(siteJson.posts.length >= 1);
 
-  // 3. SEO & AI endpoints
+  // 3. SEO & AI endpoints (dynamically driven from site settings + origin)
   const robotsRes = await app.fetch(new Request('https://mbnd.ir/robots.txt'), env);
   assert.equal(robotsRes.status, 200);
   const robotsText = await robotsRes.text();
@@ -234,16 +240,15 @@ test('Hono Worker app.fetch handles public API, SEO, vCard, SSR HTML, and Admin 
   const llmsRes = await app.fetch(new Request('https://mbnd.ir/llms.txt'), env);
   assert.equal(llmsRes.status, 200);
   const llmsText = await llmsRes.text();
-  assert.match(llmsText, /Mohammad Bagher Nouri/);
-  assert.match(llmsText, /Mohammad Bagher Noori/);
-  assert.match(llmsText, /محمدباقر نوری/);
+  assert.match(llmsText, /My Portfolio/);
   assert.match(llmsText, /mbnd\.ir/);
-  assert.match(llmsText, /طراحی سایت و ساخت اپلیکیشن با هوش مصنوعی/);
+  assert.match(llmsText, /## Published Articles/);
 
   // 4. vCard with static avatar fetched from ASSETS binding (no fs)
   const vcardRes = await app.fetch(new Request('https://mbnd.ir/api/save-contact?download=1'), env);
   assert.equal(vcardRes.status, 200);
   assert.match(vcardRes.headers.get('content-type') || '', /text\/vcard/);
+  assert.match(vcardRes.headers.get('content-disposition') || '', /filename="my-portfolio\.vcf"/);
   const vcardText = await vcardRes.text();
   assert.match(vcardText, /BEGIN:VCARD/);
   assert.match(vcardText, /PHOTO;ENCODING=b;TYPE=JPEG:/);
@@ -280,9 +285,8 @@ test('Hono Worker app.fetch handles public API, SEO, vCard, SSR HTML, and Admin 
   const homeHtml = await homeRes.text();
   assert.match(homeHtml, /id="__INITIAL_SITE_DATA__"/);
   assert.match(homeHtml, /application\/ld\+json/);
-  assert.match(homeHtml, /OfferCatalog/);
   assert.match(homeHtml, /SearchAction/);
-  assert.match(homeHtml, /Mohammad Bagher Noori/);
+  assert.match(homeHtml, /My Portfolio/);
   assert.match(homeHtml, /hreflang="fa-IR"/);
   assert.match(homeHtml, /name="keywords"/);
 
@@ -404,4 +408,233 @@ test('normalizeAiPatch supports surgical patch_blocks, blockUpdates, removeBlock
   assert.equal(fallbackMeta.mode, 'meta_only');
   assert.equal(fallbackMeta.targetLang, 'fa');
   assert.equal(fallbackMeta.excerpt, 'Just a summary');
+});
+
+test('vCard settings batch update, Persian digit normalization, bilingual AI test, Backup Import/Export, and System Logs work end-to-end', async () => {
+  setCustomLibsqlClient(createClient({ url: ':memory:' }), 'cf-v3-features');
+  const env = createTestEnv();
+
+  // Setup admin
+  const setupRes = await app.fetch(
+    new Request('https://example.com/api/admin/setup', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Host: 'example.com',
+        Origin: 'https://example.com',
+      },
+      body: JSON.stringify({ username: 'owner', password: 'StrongPassword2026' }),
+    }),
+    env,
+  );
+  assert.equal(setupRes.status, 201);
+  const { token } = (await setupRes.json()) as { token: string };
+  const authHeader = {
+    Authorization: `Bearer ${token}`,
+    'Content-Type': 'application/json',
+  };
+
+  // 1. Save full settings payload with vCard phone (Persian digits) + extra labeled fields
+  const bootRes = await app.fetch(
+    new Request('https://example.com/api/admin/bootstrap', { headers: authHeader }),
+    env,
+  );
+  const boot = (await bootRes.json()) as {
+    settings: Record<string, string>;
+    aiConfig: { model: string; hasCustomApiKey: boolean };
+  };
+  assert.equal(boot.aiConfig.model, '');
+  assert.equal(boot.aiConfig.hasCustomApiKey, false);
+
+  const saveRes = await app.fetch(
+    new Request('https://example.com/api/admin/settings', {
+      method: 'PUT',
+      headers: authHeader,
+      body: JSON.stringify({
+        ...boot.settings,
+        brandName: 'Acme Studio',
+        vcardFullName: 'سارا احمدی',
+        vcardPhone: '+۹۸ ۹۱۲ ۳۴۵ ۶۷۸۹',
+        vcardExtraFieldsJson: JSON.stringify([
+          { id: 'f1', type: 'tel', label: 'دفتر', value: '۰۲۱-۸۸۷۷۶۶۵۵' },
+          { id: 'f2', type: 'email', label: 'Work', value: 'sara@acme.example' },
+        ]),
+      }),
+    }),
+    env,
+  );
+  assert.equal(saveRes.status, 200);
+
+  const vcardRes = await app.fetch(
+    new Request('https://example.com/api/save-contact?download=1'),
+    env,
+  );
+  assert.equal(vcardRes.status, 200);
+  assert.match(vcardRes.headers.get('content-disposition') || '', /filename="acme-studio\.vcf"/);
+  const vcardBody = await vcardRes.text();
+  assert.match(vcardBody, /FN;CHARSET=UTF-8:سارا احمدی/);
+  assert.match(vcardBody, /TEL;TYPE=CELL,VOICE:\+98 912 345 6789/);
+  assert.match(vcardBody, /item1\.TEL;TYPE=CELL,VOICE:021-88776655/);
+  assert.match(vcardBody, /item1\.X-ABLabel;CHARSET=UTF-8:دفتر/);
+  assert.match(vcardBody, /item2\.EMAIL;TYPE=INTERNET:sara@acme\.example/);
+
+  // 2. Bilingual AI test connection returns concise public wording without personal text
+  const aiTestFa = await app.fetch(
+    new Request('https://example.com/api/admin/ai/test', {
+      method: 'POST',
+      headers: authHeader,
+      body: JSON.stringify({ provider: 'gemini', model: 'gemini-2.5-flash', adminLang: 'fa' }),
+    }),
+    env,
+  );
+  assert.equal(aiTestFa.status, 400);
+  assert.deepEqual(await aiTestFa.json(), { error: 'کلید API تنظیم نشده است.' });
+
+  const aiTestEn = await app.fetch(
+    new Request('https://example.com/api/admin/ai/test', {
+      method: 'POST',
+      headers: authHeader,
+      body: JSON.stringify({ provider: 'gemini', model: 'gemini-2.5-flash', adminLang: 'en' }),
+    }),
+    env,
+  );
+  assert.equal(aiTestEn.status, 400);
+  assert.deepEqual(await aiTestEn.json(), { error: 'API key is not configured.' });
+
+  // 3. Export full backup -> mutate site -> Import backup and verify full restore
+  const exportRes = await app.fetch(
+    new Request('https://example.com/api/admin/backup/export', { headers: authHeader }),
+    env,
+  );
+  assert.equal(exportRes.status, 200);
+  assert.match(
+    exportRes.headers.get('content-disposition') || '',
+    /attachment; filename="site-backup-\d{4}-\d{2}-\d{2}\.json"/,
+  );
+  const exportedBackup = (await exportRes.json()) as {
+    format: string;
+    settings: Record<string, string>;
+    posts: unknown[];
+  };
+  assert.equal(exportedBackup.format, BACKUP_FORMAT_ID);
+  assert.equal(exportedBackup.settings.brandName, 'Acme Studio');
+  assert.equal(exportedBackup.settings.vcardPhone, '+۹۸ ۹۱۲ ۳۴۵ ۶۷۸۹');
+
+  // Mutate brandName before restoring
+  await app.fetch(
+    new Request('https://example.com/api/admin/settings', {
+      method: 'PUT',
+      headers: authHeader,
+      body: JSON.stringify({ brandName: 'Temporary Changed Name' }),
+    }),
+    env,
+  );
+
+  // Restore via backup import
+  const importRes = await app.fetch(
+    new Request('https://example.com/api/admin/backup/import', {
+      method: 'POST',
+      headers: authHeader,
+      body: JSON.stringify({ mode: 'replace', backup: exportedBackup }),
+    }),
+    env,
+  );
+  assert.equal(importRes.status, 200);
+  const importJson = (await importRes.json()) as { ok: boolean; restored: { settings: number } };
+  assert.equal(importJson.ok, true);
+  assert.ok(importJson.restored.settings > 10);
+
+  const afterRestoreSite = (await (
+    await app.fetch(new Request('https://example.com/api/public/site'), env)
+  ).json()) as { settings: { brandName: string; vcardPhone: string } };
+  assert.equal(afterRestoreSite.settings.brandName, 'Acme Studio');
+  assert.equal(afterRestoreSite.settings.vcardPhone, '+۹۸ ۹۱۲ ۳۴۵ ۶۷۸۹');
+
+  // Reject invalid backup format cleanly with 400
+  const badImport = await app.fetch(
+    new Request('https://example.com/api/admin/backup/import', {
+      method: 'POST',
+      headers: authHeader,
+      body: JSON.stringify({ mode: 'replace', backup: { format: 'wrong' } }),
+    }),
+    env,
+  );
+  assert.equal(badImport.status, 400);
+
+  // 4. Client error reporting + Admin System Logs query & clear
+  const clientErrRes = await app.fetch(
+    new Request('https://example.com/api/public/client-error', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'cf-connecting-ip': '203.0.113.99' },
+      body: JSON.stringify({
+        message: 'Render crash with Bearer secretToken1234567890',
+        path: '/blog',
+        stack: 'Error: crash at BlogPage',
+      }),
+    }),
+    env,
+  );
+  assert.equal(clientErrRes.status, 201);
+
+  const logsRes = await app.fetch(
+    new Request('https://example.com/api/admin/logs?limit=50', { headers: authHeader }),
+    env,
+  );
+  assert.equal(logsRes.status, 200);
+  const logsJson = (await logsRes.json()) as {
+    logs: Array<{ level: string; source: string; message: string }>;
+    counts: { total: number; error: number; warn: number; info: number };
+  };
+  assert.ok(logsJson.counts.total >= 3);
+  assert.ok(logsJson.counts.error >= 1);
+  assert.ok(logsJson.counts.warn >= 1);
+  const clientLog = logsJson.logs.find((l) => l.source === 'client');
+  assert.ok(clientLog);
+  assert.ok(!clientLog.message.includes('secretToken1234567890'));
+  assert.match(clientLog.message, /Bearer \[REDACTED\]/);
+
+  const clearRes = await app.fetch(
+    new Request('https://example.com/api/admin/logs', { method: 'DELETE', headers: authHeader }),
+    env,
+  );
+  assert.equal(clearRes.status, 200);
+  const afterClear = (await (
+    await app.fetch(new Request('https://example.com/api/admin/logs', { headers: authHeader }), env)
+  ).json()) as { counts: { total: number } };
+  assert.equal(afterClear.counts.total, 0);
+});
+
+test('pure helpers: sanitizeLogText redacts secrets and validateAndNormalizeBackupPayload blocks internal keys', () => {
+  assert.equal(
+    sanitizeLogText('Authorization: Bearer supersecret1234567890 key=AIzaSyAbCdEfGhIjKlMnOpQrStUvWxYz123'),
+    'Authorization: Bearer [REDACTED] key=[REDACTED_KEY]',
+  );
+  assert.equal(inferLogSourceFromPath('/api/save-contact'), 'vcard');
+  assert.equal(inferLogSourceFromPath('/api/admin/backup/export'), 'backup');
+  assert.equal(inferLogSourceFromPath('/api/admin/ai/test'), 'ai');
+
+  const normalized = validateAndNormalizeBackupPayload(
+    {
+      format: BACKUP_FORMAT_ID,
+      version: 1,
+      settings: {
+        brandName: 'Clean Site',
+        _session_secret: 'hacked',
+        _ai_api_key_enc: 'hacked',
+        unknownKey: 'ignored',
+      },
+      categories: [],
+      posts: [],
+      projects: [],
+      messages: [],
+      mediaAssets: [],
+    },
+    new Set(['brandName']),
+  );
+  assert.deepEqual(normalized.settings, { brandName: 'Clean Site' });
+
+  assert.throws(
+    () => validateAndNormalizeBackupPayload({ format: 'bad' }, new Set(['brandName'])),
+    BackupValidationError,
+  );
 });

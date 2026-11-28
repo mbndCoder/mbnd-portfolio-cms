@@ -60,11 +60,11 @@ export function Navbar({
           {settings.logoImage !== '__hidden__' && (
             <BrandLogo
               src={settings.logoImage}
-              alt={settings.brandName || 'Mohammad Bagher'}
+              alt={settings.brandName || 'My Portfolio'}
               className="h-7 w-7"
             />
           )}
-          <span dir="ltr">{settings.brandName || 'Mohammad Bagher'}</span>
+          <span dir="ltr">{settings.brandName || 'My Portfolio'}</span>
         </Link>
 
         <div className="flex items-center gap-4 sm:gap-6">

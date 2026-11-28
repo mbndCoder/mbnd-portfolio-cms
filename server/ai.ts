@@ -41,9 +41,10 @@ export interface AiConnectionOverride {
   model?: string;
   baseUrl?: string;
   apiKey?: string;
+  adminLang?: SiteLanguage;
 }
 
-const SYSTEM_INSTRUCTION = `You are the dedicated, precision writing & editing assistant inside the Admin Portal of Mohammad Bagher Nouri's personal blog and portfolio (mbnd.ir).
+const SYSTEM_INSTRUCTION = `You are a dedicated, precision writing & editing assistant inside the Admin Portal of a bilingual personal portfolio and blog CMS.
 You receive the exact live state of the post editor (title, slug, excerpt, category, cover image, target editing language FA/EN, and every content block with its 0-based index).
 
 STRICT PRECISION & SURGICAL EDITING RULES:
@@ -163,20 +164,31 @@ function isPrivateOrBlockedHost(hostname: string): boolean {
   return false;
 }
 
-export function validateBaseUrl(rawUrl: string): string {
+export function validateBaseUrl(rawUrl: string, lang: SiteLanguage = 'fa'): string {
+  const isEn = lang === 'en';
   const trimmed = rawUrl.trim().replace(/\/+$/, '');
   if (!trimmed) return '';
   let parsed: URL;
   try {
     parsed = new URL(trimmed);
   } catch {
-    throw new Error('آدرس لینک ارائه‌دهنده (Base URL) نامعتبر است.');
+    throw new Error(
+      isEn ? 'Provider Base URL is invalid.' : 'آدرس ارائه‌دهنده (Base URL) نامعتبر است.',
+    );
   }
   if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-    throw new Error('آدرس ارائه‌دهنده باید با http:// یا https:// شروع شود.');
+    throw new Error(
+      isEn
+        ? 'Provider Base URL must start with http:// or https://.'
+        : 'آدرس ارائه‌دهنده باید با http:// یا https:// شروع شود.',
+    );
   }
   if (isPrivateOrBlockedHost(parsed.hostname)) {
-    throw new Error('آدرس‌های شبکه داخلی یا لوکال (localhost/IP خصوصی) مجاز نیستند.');
+    throw new Error(
+      isEn
+        ? 'Private network or localhost URLs are not allowed.'
+        : 'آدرس‌های شبکه داخلی یا لوکال مجاز نیستند.',
+    );
   }
   return parsed.toString().replace(/\/+$/, '');
 }
@@ -390,13 +402,12 @@ function mergeConfigWithOverride(
     override.provider === 'openai_compatible' || override.provider === 'gemini'
       ? override.provider
       : saved.provider;
-  const defaultModel = provider === 'gemini' ? 'gemini-4-hydrogen' : 'gpt-4.1-mini';
   const model =
-    typeof override.model === 'string' && override.model.trim()
+    typeof override.model === 'string'
       ? override.model.trim()
       : provider === saved.provider
         ? saved.model
-        : defaultModel;
+        : '';
   const baseUrl =
     typeof override.baseUrl === 'string' ? override.baseUrl.trim() : saved.baseUrl;
   const customApiKey =
@@ -418,16 +429,20 @@ async function callGeminiProvider(
   userPrompt: string,
   systemInstruction: string,
   jsonMode: boolean,
+  lang: SiteLanguage = 'fa',
 ): Promise<{ text: string; model: string }> {
+  const isEn = lang === 'en';
   const apiKey = cfg.customApiKey.trim();
   if (!apiKey) {
-    throw new Error(
-      'کلید API تنظیم نشده است. برای امنیت بیشتر، کلید پیش‌فرض غیرفعال است؛ هر زمان خواستی کلید API جمنای (یا ارائه‌دهنده دیگر) را در بخش «تنظیمات هوش مصنوعی» وارد و ذخیره کن.',
-    );
+    throw new Error(isEn ? 'API key is not configured.' : 'کلید API تنظیم نشده است.');
   }
 
-  const baseUrl = cfg.baseUrl ? validateBaseUrl(cfg.baseUrl) : '';
-  const requestedModel = cfg.model || 'gemini-4-hydrogen';
+  const requestedModel = cfg.model.trim();
+  if (!requestedModel) {
+    throw new Error(isEn ? 'AI model is not configured.' : 'مدل هوش مصنوعی تنظیم نشده است.');
+  }
+
+  const baseUrl = cfg.baseUrl ? validateBaseUrl(cfg.baseUrl, lang) : '';
 
   const ai = new GoogleGenAI({
     apiKey,
@@ -437,9 +452,9 @@ async function callGeminiProvider(
     },
   });
 
-  const invoke = async (targetModel: string) => {
+  try {
     const response = await ai.models.generateContent({
-      model: targetModel,
+      model: requestedModel,
       contents: userPrompt,
       config: {
         systemInstruction,
@@ -448,56 +463,51 @@ async function callGeminiProvider(
     });
     const text = (response.text ?? '').trim();
     if (!text) {
-      throw new Error('پاسخی از مدل Gemini دریافت نشد.');
+      throw new Error(isEn ? 'Empty response from AI provider.' : 'پاسخی از ارائه‌دهنده دریافت نشد.');
     }
-    return { text, model: targetModel };
-  };
-
-  try {
-    return await invoke(requestedModel);
+    return { text, model: requestedModel };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    const isTransientOverload =
-      msg.includes('503') || msg.includes('UNAVAILABLE') || msg.includes('high demand');
-
-    if (isTransientOverload) {
-      const fallbackModel =
-        requestedModel !== 'gemini-3.1-flash-lite' ? 'gemini-3.1-flash-lite' : 'gemini-4-hydrogen';
-      try {
-        await new Promise((r) => setTimeout(r, 500));
-        return await invoke(fallbackModel);
-      } catch (retryErr) {
-        const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
-        if (
-          retryMsg.includes('503') ||
-          retryMsg.includes('UNAVAILABLE') ||
-          retryMsg.includes('high demand')
-        ) {
-          throw new Error(
-            'سرور مدل جمنای موقتاً شلوغ است (503). لحظاتی بعد دوباره امتحان کن یا مدل gemini-3.1-flash-lite را انتخاب کن.',
-          );
-        }
-        throw new Error(`خطا در ارتباط با Gemini: ${retryMsg.slice(0, 220)}`);
-      }
+    if (msg.includes('503') || msg.includes('UNAVAILABLE') || msg.includes('high demand')) {
+      throw new Error(
+        isEn
+          ? 'The AI service is temporarily overloaded (503). Please try again shortly.'
+          : 'سرور هوش مصنوعی موقتاً شلوغ است (503). لحظاتی بعد دوباره امتحان کنید.',
+      );
     }
-
     if (msg.includes('404') || msg.includes('NOT_FOUND')) {
       throw new Error(
-        `مدل «${requestedModel}» در Gemini پیدا نشد. از مدل‌های جدید مانند gemini-4-hydrogen یا gemini-4-neon استفاده کن.`,
+        isEn
+          ? `Model "${requestedModel}" was not found.`
+          : `مدل «${requestedModel}» پیدا نشد.`,
       );
     }
     if (msg.includes('401') || msg.includes('403') || msg.includes('API_KEY_INVALID')) {
-      throw new Error('کلید API جمنای نامعتبر است یا دسترسی به این مدل را ندارد.');
+      throw new Error(
+        isEn
+          ? 'API key is invalid or lacks access to this model.'
+          : 'کلید API نامعتبر است یا به این مدل دسترسی ندارد.',
+      );
     }
     if (msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED')) {
-      throw new Error('سقف درخواست (Quota) مدل پر شده است. چند لحظه بعد امتحان کن.');
+      throw new Error(
+        isEn
+          ? 'Rate limit or quota exceeded. Please try again later.'
+          : 'سقف درخواست (Quota) پر شده است. لحظاتی بعد امتحان کنید.',
+      );
     }
     if (msg.includes('fetch failed') || msg.includes('ENOTFOUND') || msg.includes('ECONNREFUSED')) {
       throw new Error(
-        'اتصال شبکه به سرور Gemini برقرار نشد. در صورت استفاده از پروکسی، Base URL را بررسی کن.',
+        isEn
+          ? 'Network connection to the AI provider failed.'
+          : 'اتصال شبکه به سرور ارائه‌دهنده برقرار نشد.',
       );
     }
-    throw new Error(`خطا در ارتباط با Gemini: ${msg.slice(0, 220)}`);
+    throw new Error(
+      isEn
+        ? `Provider error: ${msg.slice(0, 220)}`
+        : `خطا در ارتباط با ارائه‌دهنده: ${msg.slice(0, 220)}`,
+    );
   }
 }
 
@@ -506,16 +516,20 @@ async function callOpenAiCompatibleProvider(
   userPrompt: string,
   systemInstruction: string,
   jsonMode: boolean,
+  lang: SiteLanguage = 'fa',
 ): Promise<{ text: string; model: string }> {
+  const isEn = lang === 'en';
   const apiKey = cfg.customApiKey.trim();
   if (!apiKey) {
-    throw new Error(
-      'کلید API تنظیم نشده است. برای امنیت بیشتر، کلید پیش‌فرض غیرفعال است؛ کلید API ارائه‌دهنده خودت را در «تنظیمات هوش مصنوعی» وارد و ذخیره کن.',
-    );
+    throw new Error(isEn ? 'API key is not configured.' : 'کلید API تنظیم نشده است.');
   }
 
-  const baseUrl = validateBaseUrl(cfg.baseUrl || 'https://api.openai.com/v1');
-  const model = cfg.model || 'gpt-4.1-mini';
+  const model = cfg.model.trim();
+  if (!model) {
+    throw new Error(isEn ? 'AI model is not configured.' : 'مدل هوش مصنوعی تنظیم نشده است.');
+  }
+
+  const baseUrl = validateBaseUrl(cfg.baseUrl || 'https://api.openai.com/v1', lang);
 
   const endpoint = baseUrl.endsWith('/chat/completions')
     ? baseUrl
@@ -575,9 +589,17 @@ async function callOpenAiCompatibleProvider(
             ? errObj.message
             : rawBody.slice(0, 200);
       if (res.status === 401 || res.status === 403) {
-        throw new Error('کلید API ارائه‌دهنده نامعتبر است یا دسترسی ندارد.');
+        throw new Error(
+          isEn
+            ? 'API key is invalid or unauthorized.'
+            : 'کلید API نامعتبر است یا دسترسی ندارد.',
+        );
       }
-      throw new Error(`خطای ارائه‌دهنده (${res.status}): ${detail || 'پاسخ ناموفق'}`);
+      throw new Error(
+        isEn
+          ? `Provider error (${res.status}): ${detail || 'Request failed'}`
+          : `خطای ارائه‌دهنده (${res.status}): ${detail || 'پاسخ ناموفق'}`,
+      );
     }
 
     const choices = parsed?.choices as
@@ -585,15 +607,25 @@ async function callOpenAiCompatibleProvider(
       | undefined;
     const content = choices?.[0]?.message?.content?.trim() || '';
     if (!content) {
-      throw new Error('پاسخ خالی از ارائه‌دهنده OpenAI-Compatible دریافت شد.');
+      throw new Error(
+        isEn ? 'Empty response from AI provider.' : 'پاسخ خالی از ارائه‌دهنده دریافت شد.',
+      );
     }
     return { text: content, model };
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
-      throw new Error('پاسخ‌دهی ارائه‌دهنده هوش مصنوعی بیش از حد طول کشید (Timeout).');
+      throw new Error(
+        isEn
+          ? 'AI provider request timed out.'
+          : 'پاسخ‌دهی ارائه‌دهنده هوش مصنوعی بیش از حد طول کشید.',
+      );
     }
     if (err instanceof Error && (err.message.includes('fetch failed') || err.message.includes('ENOTFOUND'))) {
-      throw new Error('امکان اتصال به آدرس Base URL واردشده وجود ندارد. نشانی را بررسی کن.');
+      throw new Error(
+        isEn
+          ? 'Could not reach the configured Base URL.'
+          : 'امکان اتصال به آدرس Base URL وجود ندارد.',
+      );
     }
     throw err;
   }
@@ -603,11 +635,12 @@ export async function runAdminAiAssist(input: AiAssistInput): Promise<AiAssistRe
   const cfg = await getAiConfigResolved();
   const userPrompt = buildUserPrompt(input);
   const contentLang: SiteLanguage = input.contentLang === 'en' ? 'en' : 'fa';
+  const adminLang: SiteLanguage = input.adminLang === 'en' ? 'en' : 'fa';
 
   const rawResult =
     cfg.provider === 'openai_compatible'
-      ? await callOpenAiCompatibleProvider(cfg, userPrompt, SYSTEM_INSTRUCTION, true)
-      : await callGeminiProvider(cfg, userPrompt, SYSTEM_INSTRUCTION, true);
+      ? await callOpenAiCompatibleProvider(cfg, userPrompt, SYSTEM_INSTRUCTION, true, adminLang)
+      : await callGeminiProvider(cfg, userPrompt, SYSTEM_INSTRUCTION, true, adminLang);
 
   const parsed = extractJsonObject(rawResult.text);
   if (!parsed) {
@@ -622,9 +655,9 @@ export async function runAdminAiAssist(input: AiAssistInput): Promise<AiAssistRe
   const reply =
     typeof parsed.reply === 'string' && parsed.reply.trim()
       ? parsed.reply.trim()
-      : input.adminLang === 'en'
+      : adminLang === 'en'
         ? 'Suggested changes are ready. Click Apply below to update the editor.'
-        : 'تغییرات پیشنهادی آماده شد. می‌توانی با دکمه زیر روی ویرایشگر اعمال کنی.';
+        : 'تغییرات پیشنهادی آماده شد. می‌توانید با دکمه زیر روی ویرایشگر اعمال کنید.';
   const patch = normalizeAiPatch(parsed.patch, contentLang);
 
   return {
@@ -641,14 +674,15 @@ export async function testAdminAiConnection(override?: AiConnectionOverride): Pr
   model: string;
   reply: string;
 }> {
+  const lang: SiteLanguage = override?.adminLang === 'en' ? 'en' : 'fa';
   const cfg = mergeConfigWithOverride(await getAiConfigResolved(), override);
-  const testPrompt = 'فقط بنویس: اتصال برقرار است.';
-  const testSystem = 'پاسخ بسیار کوتاه فارسی بده.';
+  const testPrompt = lang === 'en' ? 'Reply only: Connected.' : 'فقط بنویس: اتصال برقرار است.';
+  const testSystem = lang === 'en' ? 'Reply briefly in English.' : 'پاسخ بسیار کوتاه فارسی بده.';
 
   const res =
     cfg.provider === 'openai_compatible'
-      ? await callOpenAiCompatibleProvider(cfg, testPrompt, testSystem, false)
-      : await callGeminiProvider(cfg, testPrompt, testSystem, false);
+      ? await callOpenAiCompatibleProvider(cfg, testPrompt, testSystem, false, lang)
+      : await callGeminiProvider(cfg, testPrompt, testSystem, false, lang);
 
   return {
     ok: true,
@@ -660,19 +694,21 @@ export async function testAdminAiConnection(override?: AiConnectionOverride): Pr
 
 export type TranslateTargetKind = 'post' | 'category' | 'project' | 'settings';
 
-const TRANSLATE_SYSTEM_INSTRUCTION = `You are a professional Persian-to-English technical translator and editor for a software engineer's personal portfolio and blog (Mohammad Bagher / mbnd.ir).
+const TRANSLATE_SYSTEM_INSTRUCTION = `You are a professional Persian-to-English technical translator and editor for a bilingual portfolio and blog CMS.
 Rules:
-1. Produce crisp, natural, idiomatic English that reads as if written natively by a developer — never stiff word-for-word machine translation.
+1. Produce crisp, natural, idiomatic English that reads as if written natively — never stiff word-for-word machine translation.
 2. Preserve EVERY JSON key, structure, block id, block type, URL, and inline markdown formatting (**bold**, *italic*, ==highlight==, \`code\`, [label](url)).
-3. For code blocks ("type":"code"), NEVER translate or alter the code or language fields — copy them verbatim (only translate natural-language comments if appropriate, or leave code completely untouched).
+3. For code blocks ("type":"code"), NEVER translate or alter the code or language fields — copy them verbatim.
 4. For media blocks ("image", "video", "audio"), preserve the exact "url" untouched and translate only "alt", "title", and "caption".
 5. Return ONLY a single valid JSON object matching the exact schema requested, with no markdown fences or extra prose.`;
 
 export async function translateAdminContentToEnglish(input: {
   kind: TranslateTargetKind;
   payload: Record<string, unknown>;
+  adminLang?: SiteLanguage;
 }): Promise<{ data: Record<string, unknown>; providerUsed: AiProviderType; modelUsed: string }> {
   const cfg = await getAiConfigResolved();
+  const lang: SiteLanguage = input.adminLang === 'en' ? 'en' : 'fa';
   const prompt = [
     `Target type: ${input.kind}`,
     'Translate all Persian values in the JSON object below into natural, idiomatic English while preserving exact structure, IDs, URLs, and code blocks.',
@@ -682,12 +718,16 @@ export async function translateAdminContentToEnglish(input: {
 
   const rawResult =
     cfg.provider === 'openai_compatible'
-      ? await callOpenAiCompatibleProvider(cfg, prompt, TRANSLATE_SYSTEM_INSTRUCTION, true)
-      : await callGeminiProvider(cfg, prompt, TRANSLATE_SYSTEM_INSTRUCTION, true);
+      ? await callOpenAiCompatibleProvider(cfg, prompt, TRANSLATE_SYSTEM_INSTRUCTION, true, lang)
+      : await callGeminiProvider(cfg, prompt, TRANSLATE_SYSTEM_INSTRUCTION, true, lang);
 
   const parsed = extractJsonObject(rawResult.text);
   if (!parsed) {
-    throw new Error('پاسخ ترجمه از هوش مصنوعی قالب JSON معتبر نداشت. لطفاً دوباره امتحان کن.');
+    throw new Error(
+      lang === 'en'
+        ? 'AI translation did not return valid JSON. Please try again.'
+        : 'پاسخ ترجمه قالب JSON معتبر نداشت. لطفاً دوباره امتحان کنید.',
+    );
   }
 
   if (input.kind === 'post' && Array.isArray(parsed.blocks)) {

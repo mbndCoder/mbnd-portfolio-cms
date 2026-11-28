@@ -3,6 +3,10 @@ main = "server/app.ts"
 compatibility_date = "2025-04-01"
 compatibility_flags = ["nodejs_compat"]
 
+# Preserve all environment variables & secrets configured in the Cloudflare Dashboard
+# so redeploying from Git or Wrangler never wipes or resets your Dashboard settings.
+keep_vars = true
+
 [assets]
 directory = "./dist"
 binding = "ASSETS"
@@ -11,27 +15,33 @@ run_worker_first = [
   "/api/*",
   "/robots.txt",
   "/sitemap.xml",
+  "/rss.xml",
   "/llms.txt",
   "/llms-full.txt",
   "/favicon.ico"
 ]
 
-[vars]
-NODE_ENV = "production"
-CLOUDINARY_FOLDER = "mbnd-uploads"
-# Set your public domain URL in Cloudflare Dashboard or uncomment below:
-# APP_URL = "https://mbnd.ir"
-
 # ==============================================================================
-# Secrets (set via `npx wrangler secret put <KEY>` or Cloudflare Dashboard):
+# Configure your variables & secrets in Cloudflare Dashboard -> Settings ->
+# Variables and Secrets (or via `npx wrangler secret put <KEY>`).
+# Because `keep_vars = true` is enabled above, Dashboard variables are kept
+# intact across every deployment.
+#
+# Plaintext Variables (optional):
+#   - NODE_ENV              ("production")
+#   - APP_URL               (e.g. "https://yourdomain.com" for canonical SEO/vCard)
+#   - CLOUDINARY_FOLDER     (e.g. "site-uploads")
+#
+# Encrypted Secrets (recommended):
 #   - LIBSQL_URL            (e.g. libsql://your-db-name.turso.io)
 #   - LIBSQL_AUTH_TOKEN     (Turso auth token)
-#   - ADMIN_ROUTE           (secret admin slug without leading slash)
+#   - ADMIN_ROUTE           (secret admin URL slug without leading slash)
 #   - SESSION_SECRET        (random 32+ char hex secret)
 #   - CLOUDINARY_CLOUD_NAME
 #   - CLOUDINARY_API_KEY
 #   - CLOUDINARY_API_SECRET
-# Optional initial admin credentials (if omitted, one-time setup form activates):
+#
+# Optional initial admin credentials (omit to use the one-time setup form):
 #   - ADMIN_USERNAME
 #   - ADMIN_PASSWORD
 # ==============================================================================

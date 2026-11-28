@@ -3,7 +3,7 @@ import type { SocialIconKey } from '../types/cms.ts';
 
 export function BrandLogo({
   src,
-  alt = 'Mohammad Bagher',
+  alt = 'Site Logo',
   className = 'h-7 w-7',
 }: {
   src?: string;

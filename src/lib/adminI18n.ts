@@ -26,6 +26,8 @@ export interface AdminUiDict {
   tabAppearance: string;
   tabSettings: string;
   tabAi: string;
+  tabBackup: string;
+  tabLogs: string;
   tabSecurity: string;
   saveChanges: string;
   saving: string;
@@ -75,6 +77,8 @@ const ADMIN_FA: AdminUiDict = {
   tabAppearance: 'ظاهر، تم و زبان',
   tabSettings: 'تنظیمات و متون',
   tabAi: 'هوش مصنوعی',
+  tabBackup: 'بک‌آپ',
+  tabLogs: 'لاگ‌ها',
   tabSecurity: 'امنیت',
   saveChanges: 'ذخیره تغییرات',
   saving: 'در حال ذخیره...',
@@ -124,6 +128,8 @@ const ADMIN_EN: AdminUiDict = {
   tabAppearance: 'Appearance & Bilingual',
   tabSettings: 'Site Copy & Links',
   tabAi: 'AI Assistant',
+  tabBackup: 'Backup',
+  tabLogs: 'Logs',
   tabSecurity: 'Security',
   saveChanges: 'Save Changes',
   saving: 'Saving...',

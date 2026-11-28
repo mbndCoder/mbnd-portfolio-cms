@@ -21,6 +21,21 @@ export class ErrorBoundary extends Component<Props, State> {
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
     console.error('Unhandled UI error:', error, info.componentStack);
+    try {
+      const payload = JSON.stringify({
+        message: error?.message || String(error),
+        path: typeof window !== 'undefined' ? window.location.pathname : '/',
+        stack: [error?.stack || '', info?.componentStack || ''].filter(Boolean).join('\n').slice(0, 2400),
+      });
+      void fetch('/api/public/client-error', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: payload,
+        keepalive: true,
+      }).catch(() => {});
+    } catch {
+      // ignore reporting failures
+    }
   }
 
   handleRetry = () => {

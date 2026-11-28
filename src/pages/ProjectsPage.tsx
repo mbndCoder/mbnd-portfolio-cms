@@ -15,7 +15,7 @@ export function ProjectsPage({ projects, settings, lang }: ProjectsPageProps) {
   const loc = getLocalizedSettingsText(settings, lang);
 
   useEffect(() => {
-    document.title = `${loc.projectsSectionTitle} | ${settings.brandName || 'Mohammad Bagher'}`;
+    document.title = `${loc.projectsSectionTitle} | ${settings.brandName || 'My Portfolio'}`;
   }, [loc.projectsSectionTitle, settings.brandName]);
 
   return (
